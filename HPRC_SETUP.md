@@ -146,7 +146,11 @@ export TRANSFORMERS_CACHE=$SCRATCH/hf_cache
 mkdir -p "$CONDA_ENVS_PATH" "$CONDA_PKGS_DIRS" "$PIP_CACHE_DIR" "$HF_HOME"
 
 conda create -y -p $SCRATCH/envs/mrag python=3.11
-conda activate $SCRATCH/envs/mrag
+# On HPRC, use `source activate` NOT `conda activate`.
+# The Lmod-loaded Anaconda module does not run `conda init`, so
+# `conda activate` will error with "Run 'conda init' before 'conda activate'".
+# `source activate` works without conda init.
+source activate $SCRATCH/envs/mrag
 
 # Install torch matching the cluster CUDA module you'll use later.
 # Most HPRC GPU images ship CUDA 12.x; cu121 wheels work everywhere I’ve tested.
@@ -175,7 +179,7 @@ If `Anaconda3/2024.02-1` is not in `module avail`, just run
 > export TRANSFORMERS_CACHE=$SCRATCH/hf_cache
 > module load Anaconda3
 > module load WebProxy
-> conda activate $SCRATCH/envs/mrag
+> source activate $SCRATCH/envs/mrag
 > EOF
 > chmod +x $SCRATCH/MRAG/env.sh
 > ```
@@ -293,6 +297,10 @@ module in the JupyterLab launch form. Re-launch with it loaded.
 
 ## 11. Troubleshooting cheatsheet
 
+- **`CondaError: Run 'conda init' before 'conda activate'`** — use
+  `source activate $SCRATCH/envs/mrag` instead of `conda activate ...`.
+  The Lmod Anaconda module on HPRC does not run `conda init`. (Already
+  fixed in the commands above; this is here for grep-ability.)
 - **`OSError: ... No space left on device` during model download** — HF
   cache is going to `$HOME`. Re-run `source $SCRATCH/MRAG/env.sh` so
   `HF_HOME` points into scratch, then re-run the cell.
