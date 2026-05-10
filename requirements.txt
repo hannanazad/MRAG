@@ -30,5 +30,8 @@ tqdm>=4.66
 # ----- UI -----
 gradio>=4.44,<6.0
 
-# ----- Optional but helpful -----
+# ----- Jupyter kernel + widgets -----
+# ipykernel is needed for `python -m ipykernel install --user --name mrag`
+# so the env shows up in the JupyterLab kernel switcher.
+ipykernel>=6.29
 ipywidgets>=8.1
