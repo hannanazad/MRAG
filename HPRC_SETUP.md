@@ -297,6 +297,17 @@ module in the JupyterLab launch form. Re-launch with it loaded.
 
 ## 11. Troubleshooting cheatsheet
 
+- **Gradio launch fails with `... localhost:<port>/gradio_api/startup-events
+  failed (code 503) ...`** — the `WebProxy` module set `http_proxy` and
+  `https_proxy`, and Gradio's localhost handshake is being routed through
+  the proxy. Fix:
+  ```python
+  import os
+  os.environ["no_proxy"] = "localhost,127.0.0.1,0.0.0.0,::1"
+  os.environ["NO_PROXY"] = "localhost,127.0.0.1,0.0.0.0,::1"
+  ```
+  Run that before `demo.launch(...)`. The HPRC notebook now does this
+  automatically.
 - **`CondaError: Run 'conda init' before 'conda activate'`** — use
   `source activate $SCRATCH/envs/mrag` instead of `conda activate ...`.
   The Lmod Anaconda module on HPRC does not run `conda init`. (Already
