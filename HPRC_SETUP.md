@@ -277,21 +277,34 @@ will exist, and the notebook will load them instantly.
 Inside JupyterLab the gradio app is launched on
 `server_name="0.0.0.0"`, default port 7860. Two ways to reach it:
 
-1. **Easy & private — OnDemand proxy.** OnDemand exposes any port on
-   the compute node at:
+**Use the OnDemand reverse proxy.** OnDemand exposes any port on the
+compute node at:
 
-   ```
-   https://portal-<cluster>.hprc.tamu.edu/rnode/<hostname>/<port>/
-   ```
+```
+https://portal-<cluster>.hprc.tamu.edu/rnode/<hostname>/<port>/
+```
 
-   The HPRC notebook prints this URL for you. Click it.
+For example if your job landed on Grace compute node `g058` and the
+notebook chose port `7860`, the URL is:
 
-2. **Public tunnel — `share=True`.** Requires the `WebProxy` module
-   loaded for the JupyterLab job (Step 7). The notebook will also print
-   the `gradio.live` URL when this works.
+```
+https://portal-grace.hprc.tamu.edu/rnode/g058/7860/
+```
 
-If neither works the most common cause is forgetting the `WebProxy`
-module in the JupyterLab launch form. Re-launch with it loaded.
+The notebook prints the URL for you. **Important details:**
+
+- The **trailing slash** is required — `/rnode/g058/7860/`, not
+  `/rnode/g058/7860`.
+- Open the URL in **the same browser session** you logged into the
+  OnDemand portal with. If you see a blank page that says "blocked",
+  you're not authenticated to OnDemand — go to
+  `https://portal-<cluster>.hprc.tamu.edu` first, log in, then open the
+  notebook URL in a new tab.
+
+> **Do not use `share=True` on TAMU HPRC.** The `WebProxy` module
+> blocks the gradio.live tunnel handshake with a 403. The notebook now
+> sets `share=False` by default. The `/rnode/` proxy is the supported
+> path.
 
 ---
 
