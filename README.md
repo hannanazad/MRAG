@@ -1,18 +1,28 @@
 # MRAG — MUTCD Multimodal RAG
 
-Dual-retrieval (text sections + full pages) Multimodal RAG over the
-**Manual on Uniform Traffic Control Devices (MUTCD)**, answered by
-`Qwen/Qwen2.5-VL-3B-Instruct`.
+Multimodal RAG over the **Manual on Uniform Traffic Control Devices
+(MUTCD)**. v2 pipeline:
+
+- Caption-anchored figure/table extraction from the PDF (one PNG per
+  real figure, not per page).
+- Three retrieval indices: section text (MiniLM), figure captions
+  (MiniLM), and figure pixels (CLIP ViT-B/32).
+- Hybrid figure scoring: CLIP visual + caption text + figure-id parse
+  + keyword overlap.
+- Qwen2.5-VL (3B default; one-line switch to 7B on bigger GPUs).
+- Inline `ask("question")` interface in the notebook — answer printed
+  as Markdown, figure crops shown inline. No gradio.
 
 ## Repo contents
 
-| File / folder                | Purpose                                                                                       |
-| ---------------------------- | --------------------------------------------------------------------------------------------- |
-| `Copy_of_MRAG.ipynb`         | Original Colab notebook (kept for reference; Drive-mounted; final UI cell is the working one) |
-| `MUTCD_MRAG_HPRC.ipynb`      | **Use this on HPRC.** End-to-end pipeline adapted for TAMU HPRC JupyterLab                    |
-| `HPRC_SETUP.md`              | Step-by-step setup for TAMU HPRC (modules, conda env, OnDemand, gradio access, troubleshooting) |
-| `requirements.txt`           | Python deps for the `mrag` conda env                                                           |
-| `scripts/ingest.slurm`       | Optional SLURM job that renders page PNGs + builds embeddings off the JupyterLab GPU          |
+| File / folder                  | Purpose                                                                                       |
+| ------------------------------ | --------------------------------------------------------------------------------------------- |
+| `Copy_of_MRAG.ipynb`           | Original Colab notebook (kept for reference; Drive-mounted)                                   |
+| `MUTCD_MRAG_HPRC.ipynb`        | **Use this on HPRC.** v2 pipeline with figure extraction + CLIP retrieval + `ask()`           |
+| `HPRC_SETUP.md`                | Step-by-step setup for TAMU HPRC                                                              |
+| `requirements.txt`             | Python deps for the `mrag` conda env                                                           |
+| `scripts/extract_figures.py`   | Standalone caption-anchored figure/table extractor (PyMuPDF, CPU only)                        |
+| `scripts/ingest.slurm`         | Optional SLURM job that runs figure extraction + all embeddings off the JupyterLab GPU        |
 
 ## Quick start
 

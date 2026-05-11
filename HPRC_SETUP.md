@@ -229,20 +229,43 @@ accept the model’s license on Hugging Face once
 
 ---
 
+## 7.5 What the notebook actually does (v2 pipeline)
+
+`MUTCD_MRAG_HPRC.ipynb` does the following on first run (subsequent runs hit caches):
+
+1. **Renders fallback page PNGs** for any pages missing from `page_images/`.
+2. **Extracts caption-anchored figure crops.** Every `Figure X-Y` and `Table X-Y` in the PDF becomes one cropped PNG under `$SCRATCH/MRAG/figures/`, plus a `figures.json` index. Pure CPU; ~2–5 min for the full MUTCD.
+3. **Builds three indices in `mmrag_cache/`:**
+   - `section_embeddings.npy` (MiniLM on section prose)
+   - `figure_caption_embeddings.npy` (MiniLM on figure captions)
+   - `figure_clip_embeddings.npy` (CLIP ViT-B/32 on figure pixels)
+4. **Loads the VLM** (Qwen2.5-VL-3B by default; flip one line in the config cell for the 7B model on A100/H100).
+5. **Defines `ask("...")`.** That's your UI: it prints the answer as Markdown and shows the actual figure crops inline. No gradio, no proxy.
+
+To submit those first three steps as a SLURM batch job instead of running them in JupyterLab, use:
+
+```bash
+cd $SCRATCH/MRAG && sbatch scripts/ingest.slurm
+```
+
+---
+
 ## 8. Differences from the Colab notebook (already wired up for you)
 
 `MUTCD_MRAG_HPRC.ipynb` is the Colab notebook adapted for HPRC. Concretely:
 
-| Concern             | Colab                                  | HPRC notebook                                                                              |
+| Concern             | Colab                                  | HPRC notebook v2                                                                            |
 | ------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------ |
 | Storage             | `/content/drive/MyDrive/MRAG`          | `$SCRATCH/MRAG` (read from `os.environ["SCRATCH"]`)                                        |
 | Mounting            | `drive.mount(...)`                     | none                                                                                       |
-| Package install     | `pip install ...` in the notebook      | done once, ahead of time, into the `mrag` conda env (notebook just `import`s)              |
-| HF cache            | ephemeral in `/root/.cache`            | `$SCRATCH/hf_cache` (env vars set in cell 0)                                               |
-| GPU detection       | implicit                               | explicit `torch.cuda.is_available()` print, plus a `device_map="auto"` + `torch_dtype=bf16` |
-| Page images missing | falls back silently                    | offers to render them from the PDF with PyMuPDF inline (Step 7 below)                      |
-| Broken `llm` cell   | cell 19 references undefined `llm`     | removed; pipeline is consolidated into one working flow                                    |
-| Gradio sharing      | `share=True` only                      | tries OnDemand proxy URL first, falls back to `share=True` (needs `WebProxy`)              |
+| Package install     | `pip install ...` in the notebook      | done once, ahead of time, into the `mrag` conda env                                         |
+| HF cache            | ephemeral in `/root/.cache`            | `$SCRATCH/hf_cache`                                                                         |
+| GPU detection       | implicit                               | explicit; bf16 by default on GPU                                                            |
+| Image evidence      | full page PNGs                          | caption-anchored figure crops (one PNG per real figure/table)                              |
+| Image retrieval     | text-only on page prose                 | CLIP image-text similarity + caption MiniLM + figure-id parsing                            |
+| Text cleanup        | none — `Standard 01`, `Option`, … kept | `clean_mutcd_text()` strips them before the VLM sees the context                            |
+| VLM size            | Qwen2.5-VL-3B (fixed)                   | configurable — default 3B, one constant change to 7B                                       |
+| UI                  | gradio with `share=True`                | inline `ask("...")` in the notebook; figures shown via `IPython.display.Image`             |
 
 If `page_images/` is missing on HPRC, run the rendering cell in the
 notebook — it uses PyMuPDF to dump `page_XXXX.png` at 200 DPI in a few
@@ -272,7 +295,11 @@ will exist, and the notebook will load them instantly.
 
 ---
 
-## 10. Gradio access on HPRC — read this once
+## 10. (Legacy) Gradio access — only relevant if you re-enable gradio
+
+The v2 notebook uses inline `ask()` and does **not** start gradio. The
+section below is kept for reference in case you ever uncomment the
+gradio cell from git history. You can safely skip it for the v2 flow.
 
 Inside JupyterLab the gradio app is launched on
 `server_name="0.0.0.0"`, default port 7860. Two ways to reach it:
