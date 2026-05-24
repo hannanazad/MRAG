@@ -1,40 +1,46 @@
-# MUTCD Multimodal RAG — HPRC-friendly pinned requirements
-# Tested with Python 3.10 / 3.11 on TAMU HPRC (Grace, FASTER, Launch, ACES).
-# Install order matters when using a fresh conda env — install torch first
-# matching your CUDA module, then the rest.
+# MUTCD Multimodal RAG (v3) — HPRC-friendly pinned requirements
+# Tested with Python 3.11 on TAMU HPRC Grace (A100). Install order:
+#   1. activate the conda env (source activate $SCRATCH/envs/mrag)
+#   2. install torch + torchvision matching your CUDA module FIRST:
+#      pip install --index-url https://download.pytorch.org/whl/cu121 \
+#                  torch==2.4.1 torchvision==0.19.1
+#   3. pip install -r requirements.txt
 
-# ----- Core ML stack -----
-# Install torch separately first with the right CUDA wheel, e.g. for CUDA 12.1:
-#   pip install --index-url https://download.pytorch.org/whl/cu121 \
-#       torch==2.4.1 torchvision==0.19.1
-# Leaving torch unpinned here so the explicit install above wins.
+# ----- Core ML stack ---------------------------------------------------------
 torch>=2.3,<2.6
 torchvision>=0.18,<0.21
 
-# ----- HF + retrieval -----
+# Transformers — pinned for Qwen2.5-VL + ColQwen2 compatibility
 transformers>=4.49,<4.55
 accelerate>=0.33,<1.5
-sentence-transformers>=3.0,<4.0
 safetensors>=0.4.3
 huggingface_hub>=0.24,<1.0
-# CLIP tokenizer in sentence-transformers needs these on some installs
+qwen-vl-utils>=0.0.8
+
+# ----- Retrieval models ------------------------------------------------------
+# BGE-M3 (dense + sparse + colbert in one model)
+FlagEmbedding>=1.3,<2.0
+sentence-transformers>=3.0,<4.0      # fallback dense-only path
+# ColPali / ColQwen2 multi-vector visual retriever
+colpali-engine>=0.3.5,<0.4
+# Mixedbread reranker (best open accuracy as of 2026 Q1)
+mxbai-rerank>=0.1.0
+# ftfy / regex needed for CLIP-style tokenizers on some sentence-transformers paths
 ftfy>=6.1
 regex>=2024.4
 
-# Qwen2.5-VL helpers (image/video preprocessing)
-qwen-vl-utils>=0.0.8
+# ----- Vector DB -------------------------------------------------------------
+qdrant-client>=1.10,<2.0
 
-# ----- PDF + images -----
-pymupdf>=1.24,<2.0          # imported as `fitz`
+# ----- Knowledge graph -------------------------------------------------------
+networkx>=3.2,<4.0
+
+# ----- PDF + images ----------------------------------------------------------
+pymupdf>=1.24,<2.0
 pillow>=10.0,<12.0
 numpy>=1.26,<3.0
 tqdm>=4.66
 
-# ----- UI -----
-gradio>=4.44,<6.0
-
-# ----- Jupyter kernel + widgets -----
-# ipykernel is needed for `python -m ipykernel install --user --name mrag`
-# so the env shows up in the JupyterLab kernel switcher.
+# ----- Jupyter / display ----------------------------------------------------
 ipykernel>=6.29
 ipywidgets>=8.1

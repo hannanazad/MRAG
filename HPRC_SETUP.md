@@ -1,389 +1,206 @@
-# Running the MUTCD Multimodal RAG on TAMU HPRC
+# Running the MUTCD MRAG (v3) on TAMU HPRC
 
-This guide walks you through migrating the Colab notebook
-(`Copy_of_MRAG.ipynb`) to the HPRC-ready notebook
-(`MUTCD_MRAG_HPRC.ipynb`) and running it on **Grace**, **FASTER**,
-**Launch**, or **ACES** via the **Open OnDemand JupyterLab** portal.
+This guide assumes the v2 environment (`$SCRATCH/envs/mrag`) is already set
+up. If you're starting from scratch, do the conda env steps in §3 first;
+otherwise skip straight to §4 to install the v3 dependencies.
 
-The HPRC-side differences from Colab in one line:
-**no Drive mount → use `$SCRATCH`, request a GPU through OnDemand, load
-the `WebProxy` module so the compute node can reach the internet, and
-point Hugging Face caches at `$SCRATCH` so you don’t blow out your HOME
-quota.**
+The v3 pipeline introduces a knowledge graph, hybrid retrieval (BGE-M3
+dense + sparse), ColPali visual page retrieval (ColQwen2), and the
+mxbai-rerank-v2 cross-encoder. **Hardware floor is now an A100 40 GB**
+(Qwen2.5-VL-7B + ColQwen2 + BGE-M3 + mxbai-rerank totals ~26 GB VRAM).
 
 ---
 
-## 1. What you need on HPRC before you start
+## 1. Cluster choice and OnDemand portal
 
-1. An active HPRC account on one of the clusters (Grace / FASTER /
-   Launch / ACES). Apply at <https://hprc.tamu.edu/apply/>.
-2. Your NetID and Duo MFA configured.
-3. The three input artifacts from your Colab project:
-   - `mutcd11theditionr1hl.pdf`
-   - `mutcd_sections_with_images.json`
-   - `page_images/` (the pre-rendered per-page PNGs, `page_0001.png`, …)
+| Cluster | GPU options          | Recommended for v3 |
+| ------- | -------------------- | ------------------ |
+| FASTER  | T4 / A100-40         | Use A100-40 only.  |
+| Launch  | H100-80 / A30-24     | H100 ideal; A30 too tight. |
+| Grace   | A100-40/80 / RTX6000 | A100 ideal.        |
+| ACES    | H100 / A100 / PVC    | H100 or A100.      |
 
-   If you only have the PDF, the notebook can regenerate
-   `page_images/` for you (see Step 7).
-
-You will put everything under `$SCRATCH/MRAG/`. **Never** put the PDF or
-images in `$HOME` — HOME is tiny (~10 GB) and scratch is ~1 TB.
-
----
-
-## 2. Pick a cluster
-
-| Cluster | GPU options                          | Good for                              |
-| ------- | ------------------------------------ | ------------------------------------- |
-| FASTER  | T4 (16 GB), A100 (40 GB) “composable” | Best general choice for Qwen2.5-VL-3B |
-| Launch  | H100 (80 GB), A30 (24 GB)            | Fastest; newest stack                 |
-| ACES    | H100 / A100 / A30 / PVC / Gaudi      | Lots of accelerator variety           |
-| Grace   | A100 (40/80 GB), RTX 6000 (24 GB), T4 | Solid fallback                        |
-
-Qwen2.5-VL-3B-Instruct in bf16 needs **~7–8 GB VRAM**, so any GPU above
-≥ 12 GB is comfortable (T4, A30, A100, H100, RTX 6000 all work).
-
-Portal URLs (log in with NetID + Duo):
+Portals:
 
 - Grace:  <https://portal-grace.hprc.tamu.edu>
 - FASTER: <https://portal-faster.hprc.tamu.edu>
 - Launch: <https://portal-launch.hprc.tamu.edu>
 - ACES:   <https://portal-aces.hprc.tamu.edu>
 
----
+## 2. Upload the PDF to scratch
 
-## 3. Upload your data to `$SCRATCH`
-
-You have three easy options. Use whichever is convenient.
-
-### 3a. Open OnDemand → Files (browser, easiest)
-
-1. Log into the cluster’s portal above.
-2. Top bar → **Files → /scratch/user/<NetID>**.
-3. Create a folder `MRAG`.
-4. Click **Upload** and drag in your PDF and JSON. For `page_images/`,
-   zip it first (`page_images.zip`) and upload the zip — much faster than
-   thousands of small files.
-5. After upload, open a portal **Shell Access** and unzip:
-
-   ```bash
-   cd $SCRATCH/MRAG
-   unzip -q page_images.zip
-   ```
-
-### 3b. From your laptop with `scp` / `rsync` (fastest for big folders)
-
-Use the **data transfer node**, not a login node:
-
-```bash
-# Grace
-rsync -avh ./MRAG/  <NetID>@grace-dtn1.hprc.tamu.edu:/scratch/user/<NetID>/MRAG/
-# FASTER
-rsync -avh ./MRAG/  <NetID>@faster-dtn1.hprc.tamu.edu:/scratch/user/<NetID>/MRAG/
-# Launch
-rsync -avh ./MRAG/  <NetID>@launch-dtn1.hprc.tamu.edu:/scratch/user/<NetID>/MRAG/
+```
+$SCRATCH/MRAG/
+  mutcd11theditionr1hl.pdf      ← the only required input
 ```
 
-### 3c. Pull from your Google Drive
+If your file has a different name, that's fine: `mrag.config` will pick up
+the first `*.pdf` in `$SCRATCH/MRAG/`.
 
-In an OnDemand shell on a login node (login nodes have outbound
-internet without WebProxy):
+## 3. (Only if you don't already have it) Create the conda env
 
-```bash
-module load WebProxy   # optional on login nodes but harmless
-pip install --user gdown
-cd $SCRATCH/MRAG
-gdown --folder "<your Drive folder share link>"
-```
-
-Verify the layout:
+On a login node (login nodes have outbound internet without WebProxy):
 
 ```bash
-ls $SCRATCH/MRAG
-# expected:
-#   mutcd11theditionr1hl.pdf
-#   mutcd_sections_with_images.json
-#   page_images/          (page_0001.png, page_0002.png, ...)
-```
-
----
-
-## 4. Clone this repo into `$SCRATCH`
-
-In an OnDemand **Shell Access** session (or `ssh <NetID>@grace.hprc.tamu.edu`):
-
-```bash
-cd $SCRATCH
-git clone https://github.com/hannanazad/MRAG.git
-cd MRAG
-ls
-# Copy_of_MRAG.ipynb     <- original Colab notebook (left intact)
-# MUTCD_MRAG_HPRC.ipynb  <- HPRC-ready notebook (use this one)
-# requirements.txt
-# HPRC_SETUP.md          <- this file
-# scripts/ingest.slurm   <- optional batch ingestion job
-```
-
----
-
-## 5. Create a conda env in `$SCRATCH` (do this once)
-
-HPRC HOME has a small quota — **never** install conda envs there.
-Put them in `$SCRATCH/envs`.
-
-```bash
-# On a LOGIN node (login nodes have internet without WebProxy)
 module purge
-module load Anaconda3/2024.02-1            # exact name varies per cluster; `module avail Anaconda3`
-module load WebProxy                       # safe to load; needed if you ever do this on a compute node
+module load Anaconda3
+module load WebProxy
 
-# Tell conda + pip + HF to keep everything in $SCRATCH
 export CONDA_ENVS_PATH=$SCRATCH/envs
-export CONDA_PKGS_DIRS=$SCRATCH/conda_pkgs
-export PIP_CACHE_DIR=$SCRATCH/pip_cache
 export HF_HOME=$SCRATCH/hf_cache
 export TRANSFORMERS_CACHE=$SCRATCH/hf_cache
-mkdir -p "$CONDA_ENVS_PATH" "$CONDA_PKGS_DIRS" "$PIP_CACHE_DIR" "$HF_HOME"
+mkdir -p "$CONDA_ENVS_PATH" "$HF_HOME"
 
 conda create -y -p $SCRATCH/envs/mrag python=3.11
-# On HPRC, use `source activate` NOT `conda activate`.
-# The Lmod-loaded Anaconda module does not run `conda init`, so
-# `conda activate` will error with "Run 'conda init' before 'conda activate'".
-# `source activate` works without conda init.
-source activate $SCRATCH/envs/mrag
+source activate $SCRATCH/envs/mrag        # NOT `conda activate`; HPRC's Lmod
+                                          # Anaconda module doesn't run conda init.
 
-# Install torch matching the cluster CUDA module you'll use later.
-# Most HPRC GPU images ship CUDA 12.x; cu121 wheels work everywhere I’ve tested.
+# Torch FIRST (matched to CUDA 12.1 — works on every HPRC GPU image I've tested):
 pip install --index-url https://download.pytorch.org/whl/cu121 \
             torch==2.4.1 torchvision==0.19.1
+```
 
-# Then everything else
-pip install -r $SCRATCH/MRAG/requirements.txt
+## 4. Install the v3 deps
 
-# Register the kernel so JupyterLab can pick it.
+```bash
+cd $SCRATCH/MRAG
+git pull        # pulls the v3 pipeline + this guide
+pip install -r requirements.txt
 python -m ipykernel install --user --name mrag --display-name "Python (mrag)"
 ```
 
-If `Anaconda3/2024.02-1` is not in `module avail`, just run
-`module avail Anaconda3` and pick the newest version listed.
+This brings in:
+- `FlagEmbedding` (BGE-M3)
+- `colpali-engine` (ColQwen2)
+- `mxbai-rerank` (reranker)
+- `qdrant-client` (vector DB)
+- `networkx` (knowledge graph)
+- and the existing `pymupdf`, `transformers`, `accelerate`, etc.
 
-> Tip: put the env-variable exports into a file
-> `$SCRATCH/MRAG/env.sh` and `source` it whenever you start a new shell:
->
-> ```bash
-> cat > $SCRATCH/MRAG/env.sh <<'EOF'
-> export CONDA_ENVS_PATH=$SCRATCH/envs
-> export CONDA_PKGS_DIRS=$SCRATCH/conda_pkgs
-> export PIP_CACHE_DIR=$SCRATCH/pip_cache
-> export HF_HOME=$SCRATCH/hf_cache
-> export TRANSFORMERS_CACHE=$SCRATCH/hf_cache
-> module load Anaconda3
-> module load WebProxy
-> source activate $SCRATCH/envs/mrag
-> EOF
-> chmod +x $SCRATCH/MRAG/env.sh
-> ```
-
----
-
-## 6. Pre-download the model on the login node (recommended)
-
-Compute nodes are fastest when models are already cached. Run this once
-on a login node so the ~8 GB Qwen download lives in `$SCRATCH/hf_cache`:
+## 5. Pre-cache the four model checkpoints (one-time, on a login node)
 
 ```bash
-source $SCRATCH/MRAG/env.sh
+source $SCRATCH/MRAG/env.sh   # the helper from §3 of the v2 guide; or set env vars inline
 python - <<'PY'
 from huggingface_hub import snapshot_download
-snapshot_download("Qwen/Qwen2.5-VL-3B-Instruct")
-snapshot_download("sentence-transformers/all-MiniLM-L6-v2")
-print("Models cached under", __import__("os").environ.get("HF_HOME"))
+for m in (
+    "BAAI/bge-m3",
+    "vidore/colqwen2-v0.1",
+    "mixedbread-ai/mxbai-rerank-large-v2",
+    "Qwen/Qwen2.5-VL-7B-Instruct",
+    "Qwen/Qwen2.5-VL-3B-Instruct",      # fallback
+):
+    print("snapshot:", m)
+    snapshot_download(m)
+print("done.")
 PY
 ```
 
-If this is the **first time** the model is used you may need to
-accept the model’s license on Hugging Face once
-(<https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct>) and run
-`huggingface-cli login` with an HF token (read-scope is fine).
+Total download: ~35 GB into `$HF_HOME`.
 
----
+## 6. Run ingestion (one-time, ~30–60 min)
 
-## 7. Launch JupyterLab through OnDemand
+Two options. Either runs the full pipeline: page renders + figure crops +
+typed-paragraph chunks + sign-code dictionary + KG + BGE-M3 embeddings +
+ColQwen2 page multivectors + Qdrant upsert.
 
-1. Portal → **Interactive Apps → JupyterLab**.
-2. Fill in:
-   - **Modules to load**: `Anaconda3 WebProxy`
-     (the `WebProxy` module is what gives the compute node outbound
-     network access — without it the gradio.live tunnel and any HF
-     download from inside the notebook will hang).
-   - **Use Conda Environment**: tick it and point to
-     `/scratch/user/<NetID>/envs/mrag`.
-   - **Number of cores**: 4–8.
-   - **Memory**: 32 GB is plenty.
-   - **GPUs**: 1 (T4 / A30 / A100 / H100 — anything ≥ 12 GB).
-   - **Walltime**: 2–4 hours for development.
-3. Launch, wait for **Connect to JupyterLab**.
-4. In the file tree open `MRAG/MUTCD_MRAG_HPRC.ipynb`.
-5. Top right kernel switcher → **Python (mrag)**.
-6. Run cells top to bottom.
-
----
-
-## 7.5 What the notebook actually does (v2 pipeline)
-
-`MUTCD_MRAG_HPRC.ipynb` does the following on first run (subsequent runs hit caches):
-
-1. **Renders fallback page PNGs** for any pages missing from `page_images/`.
-2. **Extracts caption-anchored figure crops.** Every `Figure X-Y` and `Table X-Y` in the PDF becomes one cropped PNG under `$SCRATCH/MRAG/figures/`, plus a `figures.json` index. Pure CPU; ~2–5 min for the full MUTCD.
-3. **Builds three indices in `mmrag_cache/`:**
-   - `section_embeddings.npy` (MiniLM on section prose)
-   - `figure_caption_embeddings.npy` (MiniLM on figure captions)
-   - `figure_clip_embeddings.npy` (CLIP ViT-B/32 on figure pixels)
-4. **Loads the VLM** (Qwen2.5-VL-3B by default; flip one line in the config cell for the 7B model on A100/H100).
-5. **Defines `ask("...")`.** That's your UI: it prints the answer as Markdown and shows the actual figure crops inline. No gradio, no proxy.
-
-To submit those first three steps as a SLURM batch job instead of running them in JupyterLab, use:
-
-```bash
-cd $SCRATCH/MRAG && sbatch scripts/ingest.slurm
-```
-
----
-
-## 8. Differences from the Colab notebook (already wired up for you)
-
-`MUTCD_MRAG_HPRC.ipynb` is the Colab notebook adapted for HPRC. Concretely:
-
-| Concern             | Colab                                  | HPRC notebook v2                                                                            |
-| ------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Storage             | `/content/drive/MyDrive/MRAG`          | `$SCRATCH/MRAG` (read from `os.environ["SCRATCH"]`)                                        |
-| Mounting            | `drive.mount(...)`                     | none                                                                                       |
-| Package install     | `pip install ...` in the notebook      | done once, ahead of time, into the `mrag` conda env                                         |
-| HF cache            | ephemeral in `/root/.cache`            | `$SCRATCH/hf_cache`                                                                         |
-| GPU detection       | implicit                               | explicit; bf16 by default on GPU                                                            |
-| Image evidence      | full page PNGs                          | caption-anchored figure crops (one PNG per real figure/table)                              |
-| Image retrieval     | text-only on page prose                 | CLIP image-text similarity + caption MiniLM + figure-id parsing                            |
-| Text cleanup        | none — `Standard 01`, `Option`, … kept | `clean_mutcd_text()` strips them before the VLM sees the context                            |
-| VLM size            | Qwen2.5-VL-3B (fixed)                   | configurable — default 3B, one constant change to 7B                                       |
-| UI                  | gradio with `share=True`                | inline `ask("...")` in the notebook; figures shown via `IPython.display.Image`             |
-
-If `page_images/` is missing on HPRC, run the rendering cell in the
-notebook — it uses PyMuPDF to dump `page_XXXX.png` at 200 DPI in a few
-minutes. Or run the SLURM job below to do it without occupying your
-JupyterLab GPU session.
-
----
-
-## 9. (Optional) Run ingestion as a SLURM batch job
-
-If you don’t want to spend GPU walltime rendering pages and building
-embeddings inside JupyterLab, submit the included batch script. It will
-render `page_images/`, build page records, and save the embeddings
-under `$SCRATCH/MRAG/mmrag_cache/` so the JupyterLab session is
-purely interactive.
+### 6a. SLURM (preferred)
 
 ```bash
 cd $SCRATCH/MRAG
-sbatch scripts/ingest.slurm
-squeue -u $USER          # watch it
-tail -f logs/ingest-*.out
+sbatch scripts/ingest_v3.slurm
+squeue -u $USER
+tail -f logs/ingest-v3-*.out
 ```
 
-When it finishes, `mmrag_cache/section_embeddings.npy`,
-`mmrag_cache/page_embeddings.npy`, and `mmrag_cache/page_records.json`
-will exist, and the notebook will load them instantly.
+The SLURM script requests `--gres=gpu:a100:1` and 3 h walltime. Adjust if
+your cluster names A100s differently.
 
----
+### 6b. Interactive on an OnDemand JupyterLab session
 
-## 10. (Legacy) Gradio access — only relevant if you re-enable gradio
-
-The v2 notebook uses inline `ask()` and does **not** start gradio. The
-section below is kept for reference in case you ever uncomment the
-gradio cell from git history. You can safely skip it for the v2 flow.
-
-Inside JupyterLab the gradio app is launched on
-`server_name="0.0.0.0"`, default port 7860. Two ways to reach it:
-
-**Use the OnDemand reverse proxy.** OnDemand exposes any port on the
-compute node at:
-
-```
-https://portal-<cluster>.hprc.tamu.edu/rnode/<hostname>/<port>/
-```
-
-For example if your job landed on Grace compute node `g058` and the
-notebook chose port `7860`, the URL is:
-
-```
-https://portal-grace.hprc.tamu.edu/rnode/g058/7860/
-```
-
-The notebook prints the URL for you. **Important details:**
-
-- The **trailing slash** is required — `/rnode/g058/7860/`, not
-  `/rnode/g058/7860`.
-- Open the URL in **the same browser session** you logged into the
-  OnDemand portal with. If you see a blank page that says "blocked",
-  you're not authenticated to OnDemand — go to
-  `https://portal-<cluster>.hprc.tamu.edu` first, log in, then open the
-  notebook URL in a new tab.
-
-> **Do not use `share=True` on TAMU HPRC.** The `WebProxy` module
-> blocks the gradio.live tunnel handshake with a 403. The notebook now
-> sets `share=False` by default. The `/rnode/` proxy is the supported
-> path.
-
----
-
-## 11. Troubleshooting cheatsheet
-
-- **Gradio launch fails with `... localhost:<port>/gradio_api/startup-events
-  failed (code 503) ...`** — the `WebProxy` module set `http_proxy` and
-  `https_proxy`, and Gradio's localhost handshake is being routed through
-  the proxy. Fix:
-  ```python
-  import os
-  os.environ["no_proxy"] = "localhost,127.0.0.1,0.0.0.0,::1"
-  os.environ["NO_PROXY"] = "localhost,127.0.0.1,0.0.0.0,::1"
-  ```
-  Run that before `demo.launch(...)`. The HPRC notebook now does this
-  automatically.
-- **`CondaError: Run 'conda init' before 'conda activate'`** — use
-  `source activate $SCRATCH/envs/mrag` instead of `conda activate ...`.
-  The Lmod Anaconda module on HPRC does not run `conda init`. (Already
-  fixed in the commands above; this is here for grep-ability.)
-- **`OSError: ... No space left on device` during model download** — HF
-  cache is going to `$HOME`. Re-run `source $SCRATCH/MRAG/env.sh` so
-  `HF_HOME` points into scratch, then re-run the cell.
-- **`CUDA out of memory`** — pick a bigger GPU in the OnDemand form, or
-  set `VLM_DTYPE = torch.float16` (notebook has a switch), or lower
-  `FINAL_PAGE_RESULTS` to 2.
-- **Gradio hangs on launch, never prints a URL** — `WebProxy` not
-  loaded. Cancel the kernel, restart the JupyterLab job with
-  `WebProxy` in the modules field.
-- **`fitz` import error** — your kernel is not the `mrag` kernel.
-  Kernel menu → **Change Kernel → Python (mrag)**.
-- **Embeddings cell takes forever** — that’s expected on the first
-  run for `page_embeddings` (~1000 pages). It’s cached to
-  `mmrag_cache/page_embeddings.npy` afterwards and reload is instant.
-- **Pages render but look blurry** — bump `RENDER_DPI` in the notebook
-  config cell from 200 → 300.
-
----
-
-## 12. After your session
-
-`$SCRATCH` is **periodically purged** of files untouched for ~10 days
-(check the current policy with `showquota` on the cluster). For
-anything you want to keep long-term:
+If you already have a JupyterLab session open with an A100:
 
 ```bash
-# back up the artifacts to your group's project storage if you have one
-cp -r $SCRATCH/MRAG/mmrag_cache  /scratch/group/<your-project>/MRAG/
-# or back to your laptop
-rsync -avh <NetID>@grace-dtn1.hprc.tamu.edu:/scratch/user/<NetID>/MRAG/mmrag_cache ./
+cd $SCRATCH/MRAG
+python scripts/ingest_v3.py
 ```
 
-You're done. From now on a typical session is just:
-**OnDemand → JupyterLab (Anaconda3 + WebProxy + mrag env + 1 GPU) →
-open `MUTCD_MRAG_HPRC.ipynb` → run all → ask questions.**
+You can pass `--skip-pages` while developing if you want to avoid the
+~15-min ColQwen2 step; page retrieval will be silently disabled at query
+time until you re-run with pages included.
+
+## 7. Use the notebook
+
+OnDemand → **Interactive Apps → JupyterLab**:
+
+- Modules: `Anaconda3 WebProxy`
+- Conda env: `/scratch/user/<NetID>/envs/mrag`
+- GPU: **1 × A100** (or H100)
+- Memory: 48 GB
+- Walltime: 2–4 h
+
+Open `MUTCD_MRAG_HPRC.ipynb`, kernel = **Python (mrag)**, **Run All**.
+
+In any cell:
+
+```python
+from mrag.ask import ask
+ask("What is required when installing a STOP sign at an all-way stop intersection?")
+ask("Explain Figure 2B-1 and the plaques it shows", show_scores=True)
+ask("R1-3P all-way plaque")
+```
+
+Each call returns an answer Markdown + the actual figure crops the model
+used, shown inline. No gradio, no proxy.
+
+## 8. Troubleshooting
+
+- **`CondaError: Run 'conda init' before 'conda activate'`** — use
+  `source activate $SCRATCH/envs/mrag` instead of `conda activate ...`.
+- **`OSError: ... No space left on device` during model download** — your
+  `HF_HOME` is pointing at `$HOME`. Re-run with `HF_HOME=$SCRATCH/hf_cache`
+  exported.
+- **`CUDA out of memory` on VLM load** — your GPU isn't an A100. Either
+  re-launch JupyterLab with an A100, or edit `mrag/config.py` to set
+  `vlm_model = "Qwen/Qwen2.5-VL-3B-Instruct"` for the smaller fallback.
+- **ColPali `colpali_engine` import error** — `pip install colpali-engine`
+  inside the env. Some versions of `transformers` require ≥4.49.
+- **`qdrant_client.QdrantClient` storage lock errors** — you can only have
+  one `QdrantClient(path=…)` open at a time. If the notebook says the
+  database is locked, restart the kernel.
+- **Ingestion takes forever** — the ColQwen2 page-embedding step is the
+  slowest (~1 s per page × 1162 pages on an A100). Run it as a SLURM job;
+  the rest is sub-minute.
+
+## 9. What's where on disk
+
+```
+$SCRATCH/MRAG/
+  mutcd*.pdf
+  page_images/page_NNNN.png        ← fallback page renders
+  figures/<figure_id>_pNNNN.png    ← per-figure crops
+  mmrag_cache_v3/
+    chunks.jsonl                    ← one row per typed paragraph
+    figures.jsonl                   ← figure metadata
+    sign_codes.json                 ← sign-code dictionary
+    graph.gpickle                   ← NetworkX KG
+  qdrant_db/                        ← Qdrant local-file collections
+  scripts/
+    ingest_v3.py
+    ingest_v3.slurm
+  mrag/                             ← the Python package
+  MUTCD_MRAG_HPRC.ipynb             ← the notebook
+  docs/architecture.md              ← detailed design + scoring formula
+```
+
+To re-run ingestion from scratch, delete `mmrag_cache_v3/` and `qdrant_db/`.
+
+## 10. After your session
+
+```bash
+# Optional: back up artefacts before scratch's purge window.
+rsync -avh hannan_123@grace-dtn1.hprc.tamu.edu:/scratch/user/hannan_123/MRAG/{mmrag_cache_v3,qdrant_db}/ ./mrag_backup/
+```
+
+In the OnDemand dashboard, click **Delete** on the JupyterLab card when
+you're done so you stop consuming walltime.

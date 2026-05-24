@@ -1,45 +1,75 @@
 # MRAG — MUTCD Multimodal RAG
 
-Multimodal RAG over the **Manual on Uniform Traffic Control Devices
-(MUTCD)**. v2 pipeline:
+A multimodal retrieval-augmented generation system over the **Manual on
+Uniform Traffic Control Devices (MUTCD), 11th Edition**, designed to run
+on TAMU HPRC (A100 / H100 GPUs).
 
-- Caption-anchored figure/table extraction from the PDF (one PNG per
-  real figure, not per page).
-- Three retrieval indices: section text (MiniLM), figure captions
-  (MiniLM), and figure pixels (CLIP ViT-B/32).
-- Hybrid figure scoring: CLIP visual + caption text + figure-id parse
-  + keyword overlap.
-- Qwen2.5-VL (3B default; one-line switch to 7B on bigger GPUs).
-- Inline `ask("question")` interface in the notebook — answer printed
-  as Markdown, figure crops shown inline. No gradio.
+## Architecture (v3)
+
+```
+PDF ─▶ outline-driven typed-paragraph chunks (Standard / Guidance / Option / Support)
+   ─▶ caption-anchored figure / table crops
+   ─▶ sign-code dictionary (R1-1 → "STOP sign", …) by category (Regulatory / Warning / …)
+   ─▶ NetworkX knowledge graph
+        ◦ Parts / Chapters / Sections / Chunks / Figures / SignCodes / Categories
+        ◦ contains, cites_*, defines, depicts, mentions, illustrated_by, kind_of
+   ─▶ Qdrant local-file store
+        ◦ chunks   (BGE-M3 dense + sparse)
+        ◦ figures  (BGE-M3 dense)
+        ◦ pages    (ColQwen2-v0.1 multi-vector, binary-quantized)
+
+query
+  ─▶ hybrid retrieval (BGE-M3 dense + sparse, RRF)
+  ─▶ scoring = α·dense + β·sparse + γ·hierarchy + δ·graph + ε·rule_type
+  ─▶ mxbai-rerank-large-v2
+  ─▶ figures via graph cross-links (+ caption retrieval fallback)
+  ─▶ pages via ColPali MAX_SIM late-interaction
+  ─▶ Qwen2.5-VL-7B-Instruct (3B fallback) with rule-type-structured prompt
+  ─▶ structured answer: Standards / Guidance / Options / Visual evidence / Citations
+```
+
+Detailed design: [`docs/architecture.md`](docs/architecture.md).
+
+## Quick start (TAMU HPRC)
+
+1. Read [`HPRC_SETUP.md`](HPRC_SETUP.md) once.
+2. Put `mutcd11theditionr1hl.pdf` (or any `*.pdf`) in `$SCRATCH/MRAG/`.
+3. Create the `mrag` conda env in `$SCRATCH/envs/mrag`, install `requirements.txt`.
+4. Pre-cache the four checkpoints (BGE-M3, ColQwen2, mxbai-rerank-v2,
+   Qwen2.5-VL-7B+3B) into `$HF_HOME`.
+5. `sbatch scripts/ingest_v3.slurm`  (one-time, ~30–60 min on A100).
+6. Open `MUTCD_MRAG_HPRC.ipynb` in OnDemand JupyterLab (A100 GPU, kernel
+   `Python (mrag)`, modules `Anaconda3 WebProxy`), **Run All**.
+7. `ask("...")` in any cell.
 
 ## Repo contents
 
-| File / folder                  | Purpose                                                                                       |
-| ------------------------------ | --------------------------------------------------------------------------------------------- |
-| `Copy_of_MRAG.ipynb`           | Original Colab notebook (kept for reference; Drive-mounted)                                   |
-| `MUTCD_MRAG_HPRC.ipynb`        | **Use this on HPRC.** v2 pipeline with figure extraction + CLIP retrieval + `ask()`           |
-| `HPRC_SETUP.md`                | Step-by-step setup for TAMU HPRC                                                              |
-| `requirements.txt`             | Python deps for the `mrag` conda env                                                           |
-| `scripts/extract_figures.py`   | Standalone caption-anchored figure/table extractor (PyMuPDF, CPU only)                        |
-| `scripts/ingest.slurm`         | Optional SLURM job that runs figure extraction + all embeddings off the JupyterLab GPU        |
+| File / folder                | Purpose                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `Copy_of_MRAG.ipynb`         | Original Colab notebook, preserved unmodified                             |
+| `MUTCD_MRAG_HPRC.ipynb`      | The v3 notebook — initialises pipeline, `ask()` UI, KG inspector         |
+| `mrag/`                      | The Python package (parsing, KG, embeddings, retrieval, VLM, ask)         |
+| `scripts/extract_figures.py` | Standalone figure extractor (kept from v2 for offline use)               |
+| `scripts/ingest_v3.py`       | One-shot ingestion driver                                                 |
+| `scripts/ingest_v3.slurm`    | SLURM wrapper for the above                                              |
+| `requirements.txt`           | Pinned deps for the `mrag` conda env                                      |
+| `HPRC_SETUP.md`              | Step-by-step setup walkthrough                                            |
+| `docs/architecture.md`       | Full design, schema, scoring formula, justifications                      |
+| `README.md`                  | This file                                                                |
 
-## Quick start
+## Module layout (`mrag/`)
 
-1. Read **`HPRC_SETUP.md`** end-to-end (one-time setup).
-2. Put `mutcd11theditionr1hl.pdf` and `mutcd_sections_with_images.json` (and optionally `page_images/`) under `$SCRATCH/MRAG/`.
-3. Create the `mrag` conda env in `$SCRATCH/envs/mrag` from `requirements.txt`.
-4. Open OnDemand → **JupyterLab** with modules `Anaconda3 WebProxy`, conda env `mrag`, **1 GPU**.
-5. Open `MUTCD_MRAG_HPRC.ipynb`, switch kernel to **Python (mrag)**, run all.
-6. Use the OnDemand proxy URL the notebook prints (or the gradio.live link if `WebProxy` is loaded).
-
-## What changed vs. the Colab notebook
-
-- Storage `/content/drive/...` → `$SCRATCH/MRAG/...`
-- HF + pip caches forced into `$SCRATCH/hf_cache` (HOME quota is small)
-- Missing `page_images/` are auto-rendered from the PDF by the notebook
-- VLM loader has explicit `Qwen2_5_VLForConditionalGeneration` path + pipeline fallback
-- Broken alt pipeline (Colab cell 19 referencing undefined `section_chunks` and `llm`) removed; one consolidated pipeline
-- Gradio UI now also prints the OnDemand reverse-proxy URL, not just `share=True`
-
-See `HPRC_SETUP.md` for full detail.
+```
+mrag/
+  __init__.py          - package version
+  config.py            - all paths, model names, retrieval / scoring weights
+  parsing.py           - PDF outline → typed-paragraph chunks
+  figures.py           - caption-anchored figure / table cropping + page render
+  sign_codes.py        - sign-code regex + canonical name mining + categorisation
+  kg.py                - NetworkX MultiDiGraph build + query API
+  embeddings.py        - BGE-M3 (text), ColQwen2 (image), mxbai-rerank wrappers
+  vector_store.py      - Qdrant local-file wrapper (three collections)
+  retrieval.py         - hybrid + graph expansion + scoring + rerank
+  vlm.py               - Qwen2.5-VL-7B loader + structured prompt + generation
+  ask.py               - public `ask()` façade, inline display
+```

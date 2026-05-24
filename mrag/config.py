@@ -1,0 +1,113 @@
+"""All tunable knobs and paths in one place.
+
+Read by every other module via `from mrag.config import CFG`.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+
+@dataclass
+class Config:
+    # ----- Paths ------------------------------------------------------------
+    scratch: Path = field(default_factory=lambda: Path(os.environ.get("SCRATCH", "/tmp")))
+    base_dir: Path = field(init=False)
+    pdf_path: Path = field(init=False)
+
+    figures_dir: Path = field(init=False)
+    page_images_dir: Path = field(init=False)
+    cache_dir: Path = field(init=False)
+    qdrant_dir: Path = field(init=False)
+
+    chunks_jsonl: Path = field(init=False)
+    figures_jsonl: Path = field(init=False)
+    sign_codes_json: Path = field(init=False)
+    graph_pickle: Path = field(init=False)
+
+    # ----- Models -----------------------------------------------------------
+    bge_m3_model: str = "BAAI/bge-m3"
+    colqwen_model: str = "vidore/colqwen2-v0.1"
+    reranker_model: str = "mixedbread-ai/mxbai-rerank-large-v2"
+    vlm_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
+    vlm_model_fallback: str = "Qwen/Qwen2.5-VL-3B-Instruct"
+
+    # ----- Rendering --------------------------------------------------------
+    page_dpi: int = 180
+    figure_dpi: int = 220
+
+    # ----- Qdrant collection names -----------------------------------------
+    coll_chunks: str = "mutcd_chunks"
+    coll_figures: str = "mutcd_figures"
+    coll_pages: str = "mutcd_pages"
+
+    # ----- Retrieval --------------------------------------------------------
+    top_k_dense: int = 30
+    top_k_sparse: int = 30
+    top_k_fused: int = 30
+    top_k_after_graph: int = 40
+    top_k_after_rerank: int = 6
+    top_k_figures: int = 6
+    top_k_pages: int = 4
+
+    # Scoring weights:
+    #   S = α·dense + β·sparse + γ·hierarchy + δ·graph + ε·rule_type
+    w_dense:     float = 1.00
+    w_sparse:    float = 0.60
+    w_hierarchy: float = 0.20
+    w_graph:     float = 0.40
+    w_ruletype:  float = 0.30
+
+    # Rule-type multipliers (modal-verb backbone of MUTCD).
+    rt_weight_standard: float = 1.20
+    rt_weight_guidance: float = 1.00
+    rt_weight_option:   float = 0.90
+    rt_weight_support:  float = 0.70
+
+    # ----- Generation -------------------------------------------------------
+    max_new_tokens: int = 480
+    max_chunk_chars_in_prompt: int = 1400
+
+    # ----- ColPali ----------------------------------------------------------
+    colqwen_max_image_patches: int = 768
+    colqwen_use_binary_quantization: bool = True
+
+    # ----- Misc -------------------------------------------------------------
+    log_level: str = "INFO"
+
+    def __post_init__(self) -> None:
+        # Allow MRAG_BASE_DIR override (defaults to $SCRATCH/MRAG).
+        env_base = os.environ.get("MRAG_BASE_DIR")
+        self.base_dir = Path(env_base) if env_base else self.scratch / "MRAG"
+        self.pdf_path = self.base_dir / "mutcd11theditionr1hl.pdf"
+        # If no pdf at the default name, look for any *.pdf in BASE_DIR.
+        if not self.pdf_path.exists():
+            pdfs = sorted(self.base_dir.glob("*.pdf"))
+            if pdfs:
+                self.pdf_path = pdfs[0]
+
+        self.figures_dir = self.base_dir / "figures"
+        self.page_images_dir = self.base_dir / "page_images"
+        self.cache_dir = self.base_dir / "mmrag_cache_v3"
+        self.qdrant_dir = self.base_dir / "qdrant_db"
+
+        self.chunks_jsonl     = self.cache_dir / "chunks.jsonl"
+        self.figures_jsonl    = self.cache_dir / "figures.jsonl"
+        self.sign_codes_json  = self.cache_dir / "sign_codes.json"
+        self.graph_pickle     = self.cache_dir / "graph.gpickle"
+
+        for d in (self.figures_dir, self.page_images_dir, self.cache_dir, self.qdrant_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+    def rule_type_weight(self, ct: str) -> float:
+        return {
+            "Standard": self.rt_weight_standard,
+            "Guidance": self.rt_weight_guidance,
+            "Option":   self.rt_weight_option,
+            "Support":  self.rt_weight_support,
+        }.get(ct, 1.0)
+
+
+CFG = Config()
