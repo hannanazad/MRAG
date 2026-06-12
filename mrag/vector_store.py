@@ -67,12 +67,18 @@ class VectorStore:
 
         def recreate(name: str, vectors_config, sparse_vectors_config=None,
                      quantization_config=None):
-            self._client.recreate_collection(
+            # Delete-then-create rather than the deprecated recreate_collection.
+            if self._client.collection_exists(name):
+                self._client.delete_collection(name)
+            kwargs = dict(
                 collection_name=name,
                 vectors_config=vectors_config,
-                sparse_vectors_config=sparse_vectors_config or {},
-                quantization_config=quantization_config,
             )
+            if sparse_vectors_config:
+                kwargs["sparse_vectors_config"] = sparse_vectors_config
+            if quantization_config is not None:
+                kwargs["quantization_config"] = quantization_config
+            self._client.create_collection(**kwargs)
 
         # 1. Chunks: named dense vector + named sparse vector
         recreate(
@@ -170,6 +176,8 @@ class VectorStore:
             )
 
     # ----- search -----------------------------------------------------------
+    # Uses the modern `query_points()` API (qdrant-client >= 1.10). The
+    # legacy `.search()` was removed in newer client versions.
 
     def search_chunks_hybrid(
         self,
@@ -180,28 +188,30 @@ class VectorStore:
     ):
         """Returns merged top-k via Reciprocal Rank Fusion of dense+sparse."""
         from qdrant_client.http import models as qm
-        # Two parallel searches, then RRF.
-        dense_hits = self._client.search(
+
+        dense_resp = self._client.query_points(
             collection_name=name,
-            query_vector=("dense", dense.tolist()),
+            query=dense.tolist(),
+            using="dense",
             limit=top_k,
             with_payload=True,
         )
-        sparse_hits = (
-            self._client.search(
+        dense_hits = dense_resp.points
+
+        sparse_hits = []
+        if sparse:
+            sparse_resp = self._client.query_points(
                 collection_name=name,
-                query_vector=qm.NamedSparseVector(
-                    name="sparse",
-                    vector=qm.SparseVector(
-                        indices=list(sparse.keys()) or [0],
-                        values=list(sparse.values()) or [0.0],
-                    ),
+                query=qm.SparseVector(
+                    indices=list(sparse.keys()),
+                    values=list(sparse.values()),
                 ),
+                using="sparse",
                 limit=top_k,
                 with_payload=True,
             )
-            if sparse else []
-        )
+            sparse_hits = sparse_resp.points
+
         return _rrf_merge(dense_hits, sparse_hits, top_k=top_k)
 
     def search_figures(
@@ -210,12 +220,14 @@ class VectorStore:
         dense: np.ndarray,
         top_k: int = 8,
     ):
-        return self._client.search(
+        resp = self._client.query_points(
             collection_name=name,
-            query_vector=("dense", dense.tolist()),
+            query=dense.tolist(),
+            using="dense",
             limit=top_k,
             with_payload=True,
         )
+        return resp.points
 
     def search_pages(
         self,
@@ -223,13 +235,15 @@ class VectorStore:
         multivec_query: np.ndarray,
         top_k: int = 6,
     ):
-        from qdrant_client.http import models as qm
-        return self._client.search(
+        # Multi-vector query: 2D list (num_query_tokens × patch_dim).
+        resp = self._client.query_points(
             collection_name=name,
-            query_vector=qm.NamedVector(name="colbert", vector=multivec_query.tolist()),
+            query=multivec_query.tolist(),
+            using="colbert",
             limit=top_k,
             with_payload=True,
         )
+        return resp.points
 
 
 # --------------------------------------------------------------------------- #
