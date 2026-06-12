@@ -5,8 +5,8 @@ The simplest way to run this. No HPRC, no conda, no module loads.
 ## Prerequisites
 
 1. **Colab Pro+ subscription** ($50/month). Pro alone almost never allocates an A100; Pro+ does reliably. With Pro+ you get ~500 compute units/month ≈ 38 hours of A100 time.
-2. **Google Drive** with at least ~50 GB free (PDF + page renders + figure crops + HF model cache).
-3. **MUTCD PDF** uploaded to `Drive/MyDrive/MRAG/` (any filename ending in `.pdf` works).
+2. **Google Drive** with at least ~10 GB free. **A TAMU edu account's 25 GB quota is plenty** with the default config — see the storage layout below. We keep the 35 GB Hugging Face model cache off Drive and re-download each session (~6 min on Colab's fast network).
+3. **MUTCD PDF** uploaded to `Drive/MyDrive/MRAG/` (any filename ending in `.pdf` works). If your personal Drive quota is too tight even at 10 GB, use a **Shared Drive** instead — TAMU allows this; pass `shared_drive=True` to the setup helper.
 
 ## One-time setup (~10 minutes of clicking, then ~45 minutes of ingestion)
 
@@ -137,7 +137,7 @@ Each call: ~3–5 s of generation. Answer + figure crops shown inline.
 | `colpali_engine` import errors | Sometimes `pip install` order matters. Restart runtime and run cell 0 again. |
 | Qdrant lock errors on second run | A previous kernel holds the DB open. **Runtime → Restart runtime**. |
 
-## Disk usage summary
+## Disk usage summary (default config, TAMU 25 GB friendly)
 
 | Location | Size | Persistence |
 | --- | --- | --- |
@@ -146,11 +146,25 @@ Each call: ~3–5 s of generation. Answer + figure crops shown inline.
 | `Drive/MyDrive/MRAG/figures/` | ~500 MB | permanent |
 | `Drive/MyDrive/MRAG/mmrag_cache_v3/` | ~50 MB | permanent |
 | `Drive/MyDrive/MRAG/qdrant_db.tar` | ~2 GB | permanent (snapshot) |
-| `Drive/MyDrive/MRAG/hf_cache/` | ~35 GB | permanent |
-| `/content/qdrant_db/` | ~2 GB | session-local, restored from Drive |
+| `/content/hf_cache/` | ~35 GB | **session-local** — re-downloaded each session (~6 min) |
+| `/content/qdrant_db/` | ~2 GB | session-local, restored from Drive in ~30 s |
 | `/content/MRAG/` | ~50 MB | session-local, cloned from GitHub |
 
-Total Drive consumption: **~40 GB**. Make sure your Drive has at least 50 GB free before starting.
+**Total Drive consumption: ~6 GB.** Fits comfortably in a 25 GB quota.
+
+### If you have plenty of Drive (e.g. Google One 100 GB)
+
+Pass `hf_cache_on_drive=True` to `setup()` and the 35 GB model cache will persist on Drive too. You'll save ~6 minutes per session.
+
+### Using a Shared Drive instead of My Drive
+
+If your personal quota is too tight, create a Shared Drive called `MRAG`, upload the PDF there, and call:
+
+```python
+CFG = setup(drive_subdir="MRAG", shared_drive=True)
+```
+
+Shared Drives have separate quotas and aren't counted against your personal storage.
 
 ## When to switch back to HPRC
 

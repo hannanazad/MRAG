@@ -28,8 +28,19 @@ def setup(
     drive_subdir: str = "MRAG",
     require_a100: bool = True,
     skip_drive_mount: bool = False,
+    hf_cache_on_drive: bool = False,
+    shared_drive: bool = False,
 ) -> "object":
-    """Top-of-notebook setup. Returns the populated CFG object."""
+    """Top-of-notebook setup. Returns the populated CFG object.
+
+    By default keeps the 35 GB Hugging Face model cache on Colab's local
+    `/content/` disk (re-downloaded each session, ~6 min) so total Drive
+    usage stays around 6 GB. Set `hf_cache_on_drive=True` if you have
+    plenty of Drive quota and want models cached forever.
+
+    Set `shared_drive=True` if the target folder lives under
+    `/content/drive/Shareddrives/<drive_subdir>/` instead of `MyDrive/`.
+    """
     print("=" * 70)
     print(f"MRAG Colab setup")
     print("=" * 70)
@@ -47,7 +58,8 @@ def setup(
                 "If you're running locally, use the regular pipeline instead."
             )
 
-    drive_dir = drive_root / "MyDrive" / drive_subdir
+    drive_parent = "Shareddrives" if shared_drive else "MyDrive"
+    drive_dir = drive_root / drive_parent / drive_subdir
     drive_dir.mkdir(parents=True, exist_ok=True)
     print(f"Drive folder: {drive_dir}")
 
@@ -61,8 +73,16 @@ def setup(
     else:
         print(f"PDF: {pdfs[0].name}  ({pdfs[0].stat().st_size / 1e6:.1f} MB)")
 
-    # 2. Env vars for HF cache (persistent on Drive) ----------------------
-    hf_cache = drive_dir / "hf_cache"
+    # 2. Env vars for HF cache --------------------------------------------
+    # Default: ephemeral cache on /content. Saves ~35 GB of Drive quota
+    # at the cost of ~6 minutes per session re-downloading models. The
+    # ingestion artefacts (~6 GB) still go on Drive — that's what matters.
+    if hf_cache_on_drive:
+        hf_cache = drive_dir / "hf_cache"
+        cache_note = "(persistent on Drive — uses ~35 GB)"
+    else:
+        hf_cache = Path("/content") / "hf_cache"
+        cache_note = "(ephemeral — re-downloads ~28 GB each session, ~6 min)"
     hf_cache.mkdir(parents=True, exist_ok=True)
     os.environ["HF_HOME"]            = str(hf_cache)
     os.environ["TRANSFORMERS_CACHE"] = str(hf_cache)
@@ -70,7 +90,7 @@ def setup(
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"]   = "false"
     os.environ["MRAG_BASE_DIR"] = str(drive_dir)
-    print(f"HF cache: {hf_cache}")
+    print(f"HF cache: {hf_cache}  {cache_note}")
 
     # 3. Sync Qdrant from Drive (if a snapshot exists) -------------------
     drive_qdrant_zip = drive_dir / "qdrant_db.tar"
