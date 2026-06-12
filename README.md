@@ -30,30 +30,47 @@ query
 
 Detailed design: [`docs/architecture.md`](docs/architecture.md).
 
-## Quick start (TAMU HPRC)
+## Quick start
 
-1. Read [`HPRC_SETUP.md`](HPRC_SETUP.md) once.
-2. Put `mutcd11theditionr1hl.pdf` (or any `*.pdf`) in `$SCRATCH/MRAG/`.
-3. Create the `mrag` conda env in `$SCRATCH/envs/mrag`, install `requirements.txt`.
-4. Pre-cache the four checkpoints (BGE-M3, ColQwen2, mxbai-rerank-v2,
-   Qwen2.5-VL-7B+3B) into `$HF_HOME`.
-5. `sbatch scripts/ingest_v3.slurm`  (one-time, ~30–60 min on A100).
-6. Open `MUTCD_MRAG_HPRC.ipynb` in OnDemand JupyterLab (A100 GPU, kernel
+Two equivalent paths. The notebook auto-detects which one you're on.
+
+### Path A — Google Colab Pro+ with A100 (recommended)
+
+Full walkthrough: [`COLAB_SETUP.md`](COLAB_SETUP.md).
+
+1. Put `mutcd*.pdf` in `Drive/MyDrive/MRAG/`.
+2. Open `MUTCD_MRAG_HPRC.ipynb` in Colab from this repo.
+3. Set runtime to **A100 GPU**.
+4. **Run all**. Cell 0 mounts Drive + pip installs + restores any Qdrant
+   snapshot. The next cell runs ingestion once (~45 min). After that,
+   subsequent sessions start in ~2 minutes.
+
+### Path B — TAMU HPRC (Grace / FASTER / Launch / ACES)
+
+Full walkthrough: [`HPRC_SETUP.md`](HPRC_SETUP.md).
+
+1. `mutcd*.pdf` in `$SCRATCH/MRAG/`.
+2. `source activate $SCRATCH/envs/mrag` (env created per the setup guide).
+3. `sbatch scripts/ingest_v3.slurm`.
+4. Open `MUTCD_MRAG_HPRC.ipynb` in OnDemand JupyterLab (A100, kernel
    `Python (mrag)`, modules `Anaconda3 WebProxy`), **Run All**.
-7. `ask("...")` in any cell.
+
+Either way, you end up at the same `ask()` interface.
 
 ## Repo contents
 
 | File / folder                | Purpose                                                                  |
 | ---------------------------- | ------------------------------------------------------------------------ |
 | `Copy_of_MRAG.ipynb`         | Original Colab notebook, preserved unmodified                             |
-| `MUTCD_MRAG_HPRC.ipynb`      | The v3 notebook — initialises pipeline, `ask()` UI, KG inspector         |
+| `MUTCD_MRAG_HPRC.ipynb`      | The v3 notebook — auto-detects Colab / HPRC, ingestion + `ask()` UI       |
 | `mrag/`                      | The Python package (parsing, KG, embeddings, retrieval, VLM, ask)         |
+| `mrag/colab_setup.py`        | Colab-only helper: Drive mount, HF cache, Qdrant snapshot restore         |
 | `scripts/extract_figures.py` | Standalone figure extractor (kept from v2 for offline use)               |
 | `scripts/ingest_v3.py`       | One-shot ingestion driver                                                 |
-| `scripts/ingest_v3.slurm`    | SLURM wrapper for the above                                              |
-| `requirements.txt`           | Pinned deps for the `mrag` conda env                                      |
-| `HPRC_SETUP.md`              | Step-by-step setup walkthrough                                            |
+| `scripts/ingest_v3.slurm`    | SLURM wrapper for HPRC                                                    |
+| `requirements.txt`           | Pinned deps                                                              |
+| `COLAB_SETUP.md`             | Colab Pro+ A100 walkthrough (recommended path)                            |
+| `HPRC_SETUP.md`              | TAMU HPRC walkthrough                                                     |
 | `docs/architecture.md`       | Full design, schema, scoring formula, justifications                      |
 | `README.md`                  | This file                                                                |
 

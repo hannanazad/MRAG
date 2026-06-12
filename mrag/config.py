@@ -1,13 +1,51 @@
 """All tunable knobs and paths in one place.
 
 Read by every other module via `from mrag.config import CFG`.
+
+Auto-detects environment (Colab / HPRC / local) and picks the right
+base directory accordingly. Override with the env var `MRAG_BASE_DIR`.
 """
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+
+def detect_environment() -> str:
+    """Returns one of: 'colab', 'hprc', 'local'."""
+    if "google.colab" in sys.modules:
+        return "colab"
+    if os.environ.get("SCRATCH") and Path(os.environ["SCRATCH"]).exists():
+        return "hprc"
+    return "local"
+
+
+def _default_base_dir(env: str) -> Path:
+    if env == "colab":
+        # Drive mount is required; this path exists only after drive.mount(...)
+        return Path("/content/drive/MyDrive/MRAG")
+    if env == "hprc":
+        return Path(os.environ["SCRATCH"]) / "MRAG"
+    return Path.cwd() / "MRAG"
+
+
+def _default_cache_dir(env: str, base: Path) -> Path:
+    """Where Qdrant + temp embeddings live. Local disk on Colab for speed."""
+    if env == "colab":
+        return Path("/content") / "qdrant_db"
+    return base / "qdrant_db"
+
+
+def _default_hf_home(env: str, base: Path) -> Path:
+    if env == "colab":
+        # Drive HF cache survives session restarts.
+        return base / "hf_cache"
+    if env == "hprc":
+        return Path(os.environ["SCRATCH"]) / "hf_cache"
+    return base / "hf_cache"
 
 
 @dataclass
@@ -77,10 +115,12 @@ class Config:
     # ----- Misc -------------------------------------------------------------
     log_level: str = "INFO"
 
+    environment: str = field(init=False)
+
     def __post_init__(self) -> None:
-        # Allow MRAG_BASE_DIR override (defaults to $SCRATCH/MRAG).
+        self.environment = detect_environment()
         env_base = os.environ.get("MRAG_BASE_DIR")
-        self.base_dir = Path(env_base) if env_base else self.scratch / "MRAG"
+        self.base_dir = Path(env_base) if env_base else _default_base_dir(self.environment)
         self.pdf_path = self.base_dir / "mutcd11theditionr1hl.pdf"
         # If no pdf at the default name, look for any *.pdf in BASE_DIR.
         if not self.pdf_path.exists():
@@ -91,15 +131,21 @@ class Config:
         self.figures_dir = self.base_dir / "figures"
         self.page_images_dir = self.base_dir / "page_images"
         self.cache_dir = self.base_dir / "mmrag_cache_v3"
-        self.qdrant_dir = self.base_dir / "qdrant_db"
+        # Qdrant on Colab lives on local /content for speed; we sync to/from Drive.
+        self.qdrant_dir = _default_cache_dir(self.environment, self.base_dir)
 
         self.chunks_jsonl     = self.cache_dir / "chunks.jsonl"
         self.figures_jsonl    = self.cache_dir / "figures.jsonl"
         self.sign_codes_json  = self.cache_dir / "sign_codes.json"
         self.graph_pickle     = self.cache_dir / "graph.gpickle"
 
+        # On Colab the base_dir doesn't exist until Drive is mounted — guard the mkdir.
         for d in (self.figures_dir, self.page_images_dir, self.cache_dir, self.qdrant_dir):
-            d.mkdir(parents=True, exist_ok=True)
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+            except (PermissionError, OSError):
+                # Drive may not be mounted yet; user will rerun config later.
+                pass
 
     def rule_type_weight(self, ct: str) -> float:
         return {
