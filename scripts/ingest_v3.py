@@ -114,11 +114,29 @@ def step_build_kg(chunks, figures, sign_codes_dict):
 
 
 def step_text_embeddings(chunks, figures):
+    """BGE-M3 chunks (dense + sparse) and figure captions (dense).
+
+    Caches all three arrays as .npy / .json under cache_dir so re-runs of
+    ingestion (after a Colab session death) skip the ~5 min encoding step.
+    """
+    import json
+    cache_chunk_dense  = CFG.cache_dir / "chunks_dense.npy"
+    cache_chunk_sparse = CFG.cache_dir / "chunks_sparse.json"
+    cache_fig_dense    = CFG.cache_dir / "figures_dense.npy"
+
+    if (cache_chunk_dense.exists() and cache_chunk_sparse.exists()
+            and cache_fig_dense.exists()):
+        log.info("Text embeddings cache hit — loading from disk")
+        dense_c = np.load(cache_chunk_dense)
+        with open(cache_chunk_sparse, "r") as f:
+            sparse_raw = json.load(f)
+        sparse_c = [{int(k): float(v) for k, v in d.items()} for d in sparse_raw]
+        dense_f = np.load(cache_fig_dense)
+        return (dense_c, sparse_c, dense_f)
+
     log.info("Loading BGE-M3 text embedder ...")
     te = TextEmbedder(CFG.bge_m3_model).load()
 
-    # Build chunk texts for embedding. Include rule-type label so the embedding
-    # captures the modal flavour (don't strip it — it's signal, not noise).
     chunk_texts = [
         f"[{c.content_type}] Section {c.section_id} — {c.section_title}. {c.text}"
         for c in chunks
@@ -133,31 +151,62 @@ def step_text_embeddings(chunks, figures):
     ]
     log.info("Encoding %d figure captions ...", len(figure_texts))
     dense_f = te.encode_dense(figure_texts, batch_size=32)
+
+    # Cache to disk for fast resume after session death.
+    log.info("Caching text embeddings ...")
+    np.save(cache_chunk_dense, dense_c)
+    with open(cache_chunk_sparse, "w") as f:
+        json.dump([{str(k): v for k, v in d.items()} for d in sparse_c], f)
+    np.save(cache_fig_dense, dense_f)
+    log.info("  cached -> %s, %s, %s",
+             cache_chunk_dense.name, cache_chunk_sparse.name, cache_fig_dense.name)
+
     return (dense_c, sparse_c, dense_f)
 
 
 def step_page_embeddings(out_dir: Path):
-    """Encode page PNGs with ColQwen2. Returns list[(page_num, vectors)]."""
-    log.info("Loading ColQwen2 image embedder ...")
-    try:
-        ie = ImageEmbedder(CFG.colqwen_model).load()
-    except Exception as e:
-        log.warning("ColQwen2 unavailable (%r); skipping page embeddings.", e)
-        return None
+    """Encode page PNGs with ColQwen2. Returns list[(page_num, path, vectors)].
+
+    Caches each page's multi-vector as <cache_dir>/colqwen_pages/<page_num>.npy
+    so re-runs after a session death only re-encode missing pages.
+    """
+    cache = CFG.cache_dir / "colqwen_pages"
+    cache.mkdir(parents=True, exist_ok=True)
+
     pngs = sorted(CFG.page_images_dir.glob("page_*.png"))
     if not pngs:
         log.warning("No page PNGs to embed; skipping.")
         return None
-    log.info("Encoding %d pages with ColQwen2 ...", len(pngs))
+
+    # Skip pages we've already encoded.
+    todo = [p for p in pngs if not (cache / f"{int(p.stem.split('_')[1]):04d}.npy").exists()]
+    log.info("ColPali: %d pages total, %d already cached, %d to encode",
+             len(pngs), len(pngs) - len(todo), len(todo))
+
+    if todo:
+        log.info("Loading ColQwen2 image embedder ...")
+        try:
+            ie = ImageEmbedder(CFG.colqwen_model).load()
+        except Exception as e:
+            log.warning("ColQwen2 unavailable (%r); skipping page embeddings.", e)
+            return None
+
+        batch = 2
+        for i in tqdm(range(0, len(todo), batch), desc="colqwen pages"):
+            batch_paths = todo[i:i+batch]
+            imgs = [Image.open(p).convert("RGB") for p in batch_paths]
+            vecs = ie.encode_images(imgs, batch_size=batch)
+            for path, v in zip(batch_paths, vecs):
+                page_num = int(path.stem.split("_")[1])
+                np.save(cache / f"{page_num:04d}.npy", v)
+
+    # Now collect everything (newly-encoded + previously-cached) for the upsert.
     out = []
-    batch = 2
-    for i in tqdm(range(0, len(pngs), batch), desc="colqwen pages"):
-        batch_paths = pngs[i:i+batch]
-        imgs = [Image.open(p).convert("RGB") for p in batch_paths]
-        vecs = ie.encode_images(imgs, batch_size=batch)
-        for path, v in zip(batch_paths, vecs):
-            page_num = int(path.stem.split("_")[1])
-            out.append((page_num, str(path), v))
+    for p in pngs:
+        page_num = int(p.stem.split("_")[1])
+        vec = np.load(cache / f"{page_num:04d}.npy")
+        out.append((page_num, str(p), vec))
+    log.info("ColPali: %d page vectors ready", len(out))
     return out
 
 
@@ -264,6 +313,20 @@ def main():
 
     step_upsert_qdrant(chunks, figures, dense_c, sparse_c, dense_f, page_data)
     log.info("Done. Qdrant at %s | KG at %s", CFG.qdrant_dir, CFG.graph_pickle)
+
+    # Auto-snapshot to Drive on Colab so a session death never wipes the work.
+    if CFG.environment == "colab":
+        try:
+            from mrag.colab_setup import snapshot_qdrant_to_drive
+            log.info("Auto-snapshotting Qdrant to Drive ...")
+            snapshot_qdrant_to_drive(drive_subdir=CFG.base_dir.name)
+            log.info("Snapshot saved. Next session restores in ~30 s.")
+        except Exception as e:
+            log.warning(
+                "Auto-snapshot failed (%r). Run `from mrag.colab_setup "
+                "import snapshot_qdrant_to_drive; snapshot_qdrant_to_drive()` "
+                "manually before the session dies.", e
+            )
 
 
 if __name__ == "__main__":
