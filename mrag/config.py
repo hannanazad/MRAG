@@ -68,7 +68,7 @@ VLM_MODEL = "qwen3-vl-32b-instruct"   # ← CHANGE THIS to swap models
 
 # API endpoint — only used when VLM_PROVIDER == "api"
 # Qwen / DashScope OpenAI-compatible endpoint:
-API_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+API_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 # For OpenRouter (access many models through one key):
 # API_BASE_URL = "https://openrouter.ai/api/v1"
 # For standard OpenAI (GPT-4o etc.):
