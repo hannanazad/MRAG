@@ -1,19 +1,32 @@
 """Qwen2.5-VL-7B-Instruct (default) wrapper.
 
-Loads the explicit `Qwen2_5_VLForConditionalGeneration` + `AutoProcessor` +
-`qwen_vl_utils.process_vision_info` path. Falls back to the 3B model if 7B
-doesn't fit on the available GPU.
+Supports two backends, controlled by mrag/config.py:
+  - VLM_PROVIDER = "local" → loads weights via HuggingFace transformers
+                              (original behaviour, unchanged)
+  - VLM_PROVIDER = "api"   → calls an OpenAI-compatible REST endpoint
+                              (e.g. Qwen3-VL-32B via DashScope) — no GPU,
+                              no local download
 
 The prompt mirrors MUTCD's own taxonomy: outputs are blocked by rule type
 (Standards / Guidance / Options / Support) and citations are restricted to
-an explicit whitelist constructed from retrieval results.
+an explicit whitelist constructed from retrieval results. This logic is
+backend-agnostic — only the final "send to model" step differs.
+
+To swap models or providers, edit mrag/config.py only:
+    VLM_PROVIDER = "api" | "local"
+    VLM_MODEL     = "qwen3-vl-32b-instruct"   (api mode)
+    or pass model_name= to VLM(...) directly for local mode.
 """
 from __future__ import annotations
 
+import base64
+import io
 import logging
-from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from mrag import config
 
 log = logging.getLogger("mrag.vlm")
 
@@ -24,17 +37,57 @@ class VLM:
         model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct",
         fallback_name: str = "Qwen/Qwen2.5-VL-3B-Instruct",
         torch_dtype: str = "bfloat16",
+        provider: Optional[str] = None,
     ) -> None:
+        """
+        provider: "local" or "api". Defaults to config.VLM_PROVIDER if not given,
+        so existing code that does VLM().load().answer(...) keeps working
+        unchanged — it just respects whatever is set in config.py.
+        """
         self.model_name = model_name
         self.fallback_name = fallback_name
         self.torch_dtype = torch_dtype
+        self.provider = provider or getattr(config, "VLM_PROVIDER", "local")
         self._model = None
         self._processor = None
         self._loaded_name = None
+        self._api_client = None
+
+    # ────────────────────────────────────────────────────────────────────
+    # Loading
+    # ────────────────────────────────────────────────────────────────────
 
     def load(self) -> "VLM":
+        if self.provider == "api":
+            self._load_api()
+        else:
+            self._load_local()
+        return self
+
+    def _load_api(self) -> None:
+        try:
+            import openai
+        except ImportError:
+            raise ImportError("API mode needs the openai package: pip install openai")
+
+        api_key = os.environ.get(getattr(config, "API_KEY_ENV_VAR", "VLM_API_KEY"))
+        if not api_key:
+            raise EnvironmentError(
+                f"Set the environment variable "
+                f"'{getattr(config, 'API_KEY_ENV_VAR', 'VLM_API_KEY')}' "
+                f"before calling .load(), e.g.:\n"
+                f"  import os; os.environ['VLM_API_KEY'] = 'sk-...'"
+            )
+
+        self._api_client = openai.OpenAI(
+            api_key=api_key,
+            base_url=config.API_BASE_URL,
+        )
+        self._loaded_name = config.VLM_MODEL
+        log.info("VLM (api) ready: %s @ %s", config.VLM_MODEL, config.API_BASE_URL)
+
+    def _load_local(self) -> None:
         import torch
-        from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
         try:
             self._do_load(self.model_name, torch_dtype=getattr(torch, self.torch_dtype))
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
@@ -42,14 +95,14 @@ class VLM:
                         self.model_name, e, self.fallback_name)
             torch.cuda.empty_cache()
             self._do_load(self.fallback_name, torch_dtype=getattr(torch, self.torch_dtype))
-        return self
 
     def _do_load(self, name, torch_dtype):
         from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+        cache_dir = str(getattr(config, "HF_CACHE_DIR", None)) or None
         self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            name, torch_dtype=torch_dtype, device_map="auto",
+            name, torch_dtype=torch_dtype, device_map="auto", cache_dir=cache_dir,
         ).eval()
-        self._processor = AutoProcessor.from_pretrained(name)
+        self._processor = AutoProcessor.from_pretrained(name, cache_dir=cache_dir)
         self._loaded_name = name
         log.info("VLM loaded: %s (%s)", name, torch_dtype)
 
@@ -57,7 +110,9 @@ class VLM:
     def loaded_name(self) -> str:
         return self._loaded_name or ""
 
-    # ----- generation ------------------------------------------------------
+    # ────────────────────────────────────────────────────────────────────
+    # Generation — public method, unchanged signature
+    # ────────────────────────────────────────────────────────────────────
 
     def answer(
         self,
@@ -67,9 +122,23 @@ class VLM:
         pages: List[Dict[str, Any]],
         max_new_tokens: int = 480,
     ) -> str:
+        prompt, image_paths = self._build_prompt_and_images(question, chunks, figures, pages)
+
+        if self.provider == "api":
+            return self._answer_api(prompt, image_paths, max_new_tokens)
+        else:
+            return self._answer_local(prompt, image_paths, max_new_tokens)
+
+    # ----- local generation (original behaviour, unchanged) ---------------
+
+    def _answer_local(self, prompt: str, image_paths: List[str], max_new_tokens: int) -> str:
         import torch
         from qwen_vl_utils import process_vision_info
-        messages = self._build_messages(question, chunks, figures, pages)
+
+        content: List[Dict[str, Any]] = [{"type": "image", "image": f"file://{p}"} for p in image_paths]
+        content.append({"type": "text", "text": prompt})
+        messages = [{"role": "user", "content": content}]
+
         text = self._processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
         )
@@ -93,26 +162,46 @@ class VLM:
         )[0].strip()
         return out_text
 
-    # ----- prompt ----------------------------------------------------------
+    # ----- API generation (new) --------------------------------------------
 
-    def _build_messages(self, question, chunks, figures, pages):
-        from pathlib import Path
-        content: List[Dict[str, Any]] = []
+    def _answer_api(self, prompt: str, image_paths: List[str], max_new_tokens: int) -> str:
+        content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for p in image_paths:
+            if Path(p).exists():
+                b64 = base64.b64encode(Path(p).read_bytes()).decode("utf-8")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                })
 
-        # Attach figure / page images (in order; they'll be cited as [Image N]).
+        response = self._api_client.chat.completions.create(
+            model=config.VLM_MODEL,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=max_new_tokens,
+        )
+        return response.choices[0].message.content.strip()
+
+    # ────────────────────────────────────────────────────────────────────
+    # Prompt building — IDENTICAL logic to original, just refactored to
+    # return (prompt_text, image_paths) instead of a messages list, so
+    # both backends can consume it.
+    # ────────────────────────────────────────────────────────────────────
+
+    def _build_prompt_and_images(self, question, chunks, figures, pages):
+        image_paths: List[str] = []
         used_visuals = []
+
         for f in figures:
             ip = f.get("image_path", "")
             if ip and Path(ip).exists():
-                content.append({"type": "image", "image": f"file://{ip}"})
+                image_paths.append(ip)
                 used_visuals.append(("Figure", f))
         for p in pages:
             ip = p.get("image_path", "")
             if ip and Path(ip).exists():
-                content.append({"type": "image", "image": f"file://{ip}"})
-                used_visuals.append(("Page",   p))
+                image_paths.append(ip)
+                used_visuals.append(("Page", p))
 
-        # Group chunks by content_type so the model can mirror MUTCD's taxonomy.
         groups: Dict[str, List[Dict[str, Any]]] = {
             "Standard": [], "Guidance": [], "Option": [], "Support": [],
         }
@@ -120,11 +209,11 @@ class VLM:
             ct = c.get("content_type", "Support")
             groups.setdefault(ct, []).append(c)
 
-        # Build the textual evidence section, type-by-type.
         evidence_blocks = []
         for ct in ("Standard", "Guidance", "Option", "Support"):
             cs = groups.get(ct, [])
-            if not cs: continue
+            if not cs:
+                continue
             evidence_blocks.append(f"=== {ct} provisions ===")
             for c in cs:
                 evidence_blocks.append(
@@ -134,7 +223,6 @@ class VLM:
                 )
             evidence_blocks.append("")
 
-        # Visual-evidence index
         visual_lines = []
         for i, (kind, v) in enumerate(used_visuals, 1):
             if kind == "Figure":
@@ -147,7 +235,6 @@ class VLM:
                     f"[Image {i}] Page {v.get('page_printed','?')} (full page view)"
                 )
 
-        # Allowed-citation whitelist
         allowed_cites = []
         for c in chunks:
             allowed_cites.append(
@@ -185,5 +272,4 @@ class VLM:
             f"Allowed citations (use ONLY these strings verbatim):\n"
             + "\n".join(f"  - {c}" for c in allowed_cites) + "\n"
         )
-        content.append({"type": "text", "text": prompt})
-        return [{"role": "user", "content": content}]
+        return prompt, image_paths
