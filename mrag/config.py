@@ -1,98 +1,192 @@
+"""All tunable knobs and paths in one place.
+
+Read by every other module via `from mrag.config import CFG`.
+
+Auto-detects environment (Colab / HPRC / local) and picks the right
+base directory accordingly. Override with the env var `MRAG_BASE_DIR`.
 """
-MRAG Central Configuration
-===========================
-All storage paths and model settings live here.
-To move your data to a different location, change STORAGE_ROOT only.
-To swap the VLM, change VLM_PROVIDER and VLM_MODEL only.
-"""
+from __future__ import annotations
 
 import os
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STORAGE — change this one line to move everything
-# ─────────────────────────────────────────────────────────────────────────────
 
-# Options (uncomment whichever applies):
-#   Google Drive (Colab):  "/content/drive/MyDrive/MRAG"
-#   HPRC $SCRATCH:         os.environ.get("SCRATCH", "/scratch") + "/MRAG"
-#   Local:                 str(Path.home() / "MRAG")
+def detect_environment() -> str:
+    """Returns one of: 'colab', 'hprc', 'local'."""
+    if "google.colab" in sys.modules:
+        return "colab"
+    if os.environ.get("SCRATCH") and Path(os.environ["SCRATCH"]).exists():
+        return "hprc"
+    return "local"
 
-STORAGE_ROOT = "/content/drive/MyDrive/MRAG"   # ← CHANGE ONLY THIS LINE
 
-# All sub-paths are derived automatically — do not edit below this line
-STORAGE_ROOT   = Path(STORAGE_ROOT)
-PDF_PATH       = STORAGE_ROOT / "mutcd.pdf"         # source PDF
-PAGE_PNG_DIR   = STORAGE_ROOT / "pages"             # rendered page images
-FIGURE_DIR     = STORAGE_ROOT / "figures"           # cropped figure images
-QDRANT_PATH    = STORAGE_ROOT / "qdrant_db"         # vector store
-GRAPH_PATH     = STORAGE_ROOT / "graph.gpickle"     # NetworkX knowledge graph
-SIGN_CODES_PATH= STORAGE_ROOT / "sign_codes.json"   # sign code dictionary
-FIGURES_JSONL  = STORAGE_ROOT / "figures.jsonl"     # figure metadata
+def _default_base_dir(env: str) -> Path:
+    if env == "colab":
+        # Drive mount is required; this path exists only after drive.mount(...)
+        return Path("/content/drive/MyDrive/MRAG")
+    if env == "hprc":
+        return Path(os.environ["SCRATCH"]) / "MRAG"
+    return Path.cwd() / "MRAG"
 
-# HuggingFace model cache — redirected away from ~/.cache to avoid filling
-# Google Drive or home quota. Set to a fast local disk.
-HF_CACHE_DIR   = STORAGE_ROOT / "hf_cache"
 
-# Apply HF cache redirect immediately on import so it takes effect before
-# any transformers/huggingface_hub imports elsewhere.
-os.environ["HF_HOME"]             = str(HF_CACHE_DIR)
-os.environ["HUGGINGFACE_HUB_CACHE"] = str(HF_CACHE_DIR)
-os.environ["TRANSFORMERS_CACHE"] = str(HF_CACHE_DIR)
+def _default_cache_dir(env: str, base: Path) -> Path:
+    """Where Qdrant + temp embeddings live. Local disk on Colab for speed."""
+    if env == "colab":
+        return Path("/content") / "qdrant_db"
+    return base / "qdrant_db"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# VLM (Visual Language Model) — change these two lines to swap models
-# ─────────────────────────────────────────────────────────────────────────────
 
-# VLM_PROVIDER options:
-#   "api"   → use an OpenAI-compatible REST API (no GPU / no local download)
-#   "local" → load model weights onto local GPU via HuggingFace transformers
+def _default_hf_home(env: str, base: Path) -> Path:
+    if env == "colab":
+        # Drive HF cache survives session restarts.
+        return base / "hf_cache"
+    if env == "hprc":
+        return Path(os.environ["SCRATCH"]) / "hf_cache"
+    return base / "hf_cache"
 
-VLM_PROVIDER = "api"       # ← "api" or "local"
 
-# When VLM_PROVIDER == "api":
-#   Model name string sent to the API endpoint.
-#   Examples:
-#     Qwen3 VL 32B (current):   "qwen3-vl-32b-instruct"
-#     Qwen2.5 VL 72B:           "qwen2.5-vl-72b-instruct"
-#     GPT-4o:                   "gpt-4o"              (change API_BASE_URL too)
-#     Claude claude-opus-4-6:      "claude-opus-4-6"       (use Anthropic SDK instead)
-#
-# When VLM_PROVIDER == "local":
-#   HuggingFace model ID downloaded to HF_CACHE_DIR.
-#   Examples:
-#     "Qwen/Qwen2.5-VL-7B-Instruct"   (original, ~17 GB)
-#     "Qwen/Qwen2.5-VL-3B-Instruct"   (lighter fallback, ~8 GB)
+@dataclass
+class Config:
+    # ----- Paths ------------------------------------------------------------
+    scratch: Path = field(default_factory=lambda: Path(os.environ.get("SCRATCH", "/tmp")))
+    base_dir: Path = field(init=False)
+    pdf_path: Path = field(init=False)
 
-VLM_MODEL = "qwen3-vl-32b-instruct"   # ← CHANGE THIS to swap models
+    figures_dir: Path = field(init=False)
+    page_images_dir: Path = field(init=False)
+    cache_dir: Path = field(init=False)
+    qdrant_dir: Path = field(init=False)
 
-# API endpoint — only used when VLM_PROVIDER == "api"
-# Qwen / DashScope OpenAI-compatible endpoint:
-API_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-# For OpenRouter (access many models through one key):
-# API_BASE_URL = "https://openrouter.ai/api/v1"
-# For standard OpenAI (GPT-4o etc.):
-# API_BASE_URL = "https://api.openai.com/v1"
+    chunks_jsonl: Path = field(init=False)
+    figures_jsonl: Path = field(init=False)
+    sign_codes_json: Path = field(init=False)
+    graph_pickle: Path = field(init=False)
 
-# API key — read from environment variable so it is never hard-coded in source.
-# Set it in your Colab / HPRC session with:
-#   import os; os.environ["VLM_API_KEY"] = "sk-..."
-# Or add it to your ~/.bashrc / job script:
-#   export VLM_API_KEY="sk-..."
-API_KEY_ENV_VAR = "VLM_API_KEY"   # name of the env var that holds your key
+    hf_home: Path = field(init=False)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Retrieval / generation parameters — safe to leave as-is
-# ─────────────────────────────────────────────────────────────────────────────
+    # ----- Models -----------------------------------------------------------
+    bge_m3_model: str = "BAAI/bge-m3"
+    colqwen_model: str = "vidore/colqwen2-v0.1"
+    reranker_model: str = "mixedbread-ai/mxbai-rerank-large-v2"
+    vlm_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
+    vlm_model_fallback: str = "Qwen/Qwen2.5-VL-3B-Instruct"
 
-TOP_K_CHUNKS   = 30    # candidates from hybrid vector search
-RERANK_TOP_K   = 6     # chunks kept after cross-encoder rerank
-TOP_K_PAGES    = 4     # page images sent to VLM
-MAX_NEW_TOKENS = 1024  # max tokens in VLM answer
+    # ----- VLM provider (NEW) ------------------------------------------------
+    # "local" → load vlm_model weights onto local GPU via transformers (original
+    #           behaviour, unchanged).
+    # "api"   → call an OpenAI-compatible REST endpoint instead. No GPU,
+    #           no local download. Set vlm_model_api / api_base_url below.
+    vlm_provider: str = "api"   # "api" or "local"
 
-# Scoring weights  S = α·dense + β·sparse + γ·hierarchy + δ·graph + ε·rule
-ALPHA   = 1.0   # dense vector similarity
-BETA    = 0.6   # sparse (BM25-style) similarity
-GAMMA   = 0.2   # document hierarchy proximity
-DELTA   = 0.4   # knowledge-graph proximity
-EPSILON = 0.3   # rule-type weight (Standard > Guidance > Option > Support)
+    # Model name string sent to the API endpoint when vlm_provider == "api".
+    # This is separate from vlm_model (which is the HF model ID used in
+    # "local" mode) so switching providers never collides with the other's
+    # naming scheme.
+    vlm_model_api: str = "qwen3-vl-32b-instruct"
+
+    # OpenAI-compatible API endpoint. Use the INTERNATIONAL DashScope URL
+    # unless your Alibaba Cloud account is registered in mainland China.
+    api_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+    # Name of the environment variable holding the API key. Set this in your
+    # session (Colab Secrets, HPRC env, etc.) — never hard-code the key here.
+    api_key_env_var: str = "VLM_API_KEY"
+
+    # ----- Rendering --------------------------------------------------------
+    page_dpi: int = 180
+    figure_dpi: int = 220
+
+    # ----- Qdrant collection names -----------------------------------------
+    coll_chunks: str = "mutcd_chunks"
+    coll_figures: str = "mutcd_figures"
+    coll_pages: str = "mutcd_pages"
+
+    # ----- Retrieval --------------------------------------------------------
+    top_k_dense: int = 30
+    top_k_sparse: int = 30
+    top_k_fused: int = 30
+    top_k_after_graph: int = 40
+    top_k_after_rerank: int = 6
+    top_k_figures: int = 6
+    top_k_pages: int = 4
+
+    # Scoring weights:
+    #   S = α·dense + β·sparse + γ·hierarchy + δ·graph + ε·rule_type
+    w_dense:     float = 1.00
+    w_sparse:    float = 0.60
+    w_hierarchy: float = 0.20
+    w_graph:     float = 0.40
+    w_ruletype:  float = 0.30
+
+    # Rule-type multipliers (modal-verb backbone of MUTCD).
+    rt_weight_standard: float = 1.20
+    rt_weight_guidance: float = 1.00
+    rt_weight_option:   float = 0.90
+    rt_weight_support:  float = 0.70
+
+    # ----- Generation -------------------------------------------------------
+    max_new_tokens: int = 480
+    max_chunk_chars_in_prompt: int = 1400
+
+    # ----- ColPali ----------------------------------------------------------
+    colqwen_max_image_patches: int = 768
+    colqwen_use_binary_quantization: bool = True
+
+    # ----- Misc -------------------------------------------------------------
+    log_level: str = "INFO"
+
+    environment: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.environment = detect_environment()
+        env_base = os.environ.get("MRAG_BASE_DIR")
+        self.base_dir = Path(env_base) if env_base else _default_base_dir(self.environment)
+        self.pdf_path = self.base_dir / "mutcd11theditionr1hl.pdf"
+        # If no pdf at the default name, look for any *.pdf in BASE_DIR.
+        if not self.pdf_path.exists():
+            pdfs = sorted(self.base_dir.glob("*.pdf"))
+            if pdfs:
+                self.pdf_path = pdfs[0]
+
+        self.figures_dir = self.base_dir / "figures"
+        self.page_images_dir = self.base_dir / "page_images"
+        self.cache_dir = self.base_dir / "mmrag_cache_v3"
+        # Qdrant on Colab lives on local /content for speed; we sync to/from Drive.
+        self.qdrant_dir = _default_cache_dir(self.environment, self.base_dir)
+
+        self.chunks_jsonl     = self.cache_dir / "chunks.jsonl"
+        self.figures_jsonl    = self.cache_dir / "figures.jsonl"
+        self.sign_codes_json  = self.cache_dir / "sign_codes.json"
+        self.graph_pickle     = self.cache_dir / "graph.gpickle"
+
+        # HuggingFace model cache — only matters when vlm_provider == "local"
+        # (or for the always-local embedders: BGE-M3, ColQwen2, reranker).
+        # Redirected away from ~/.cache so it doesn't fill home/Drive quota
+        # unexpectedly.
+        self.hf_home = _default_hf_home(self.environment, self.base_dir)
+        os.environ.setdefault("HF_HOME", str(self.hf_home))
+        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(self.hf_home))
+        os.environ.setdefault("TRANSFORMERS_CACHE", str(self.hf_home))
+
+        # On Colab the base_dir doesn't exist until Drive is mounted — guard the mkdir.
+        for d in (self.figures_dir, self.page_images_dir, self.cache_dir,
+                  self.qdrant_dir, self.hf_home):
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+            except (PermissionError, OSError):
+                # Drive may not be mounted yet; user will rerun config later.
+                pass
+
+    def rule_type_weight(self, ct: str) -> float:
+        return {
+            "Standard": self.rt_weight_standard,
+            "Guidance": self.rt_weight_guidance,
+            "Option":   self.rt_weight_option,
+            "Support":  self.rt_weight_support,
+        }.get(ct, 1.0)
+
+
+CFG = Config()
