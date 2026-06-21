@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-
 def detect_environment() -> str:
     """Returns one of: 'colab', 'hprc', 'local'.
 
@@ -39,7 +38,6 @@ def detect_environment() -> str:
         return "hprc"
     return "local"
 
-
 def _default_base_dir(env: str) -> Path:
     if env == "colab":
         # Drive mount is required; this path exists only after drive.mount(...)
@@ -48,13 +46,11 @@ def _default_base_dir(env: str) -> Path:
         return Path(os.environ["SCRATCH"]) / "MRAG"
     return Path.cwd() / "MRAG"
 
-
 def _default_cache_dir(env: str, base: Path) -> Path:
     """Where Qdrant + temp embeddings live. Local disk on Colab for speed."""
     if env == "colab":
         return Path("/content") / "qdrant_db"
     return base / "qdrant_db"
-
 
 def _default_hf_home(env: str, base: Path) -> Path:
     if env == "colab":
@@ -63,7 +59,6 @@ def _default_hf_home(env: str, base: Path) -> Path:
     if env == "hprc":
         return Path(os.environ["SCRATCH"]) / "hf_cache"
     return base / "hf_cache"
-
 
 @dataclass
 class Config:
@@ -93,10 +88,10 @@ class Config:
 
     # ----- VLM provider -------------------------------------------------------
     # "local" → load vlm_model weights onto local GPU via transformers (original
-    #           behaviour, unchanged).
-    # "api"   → call an OpenAI-compatible REST endpoint instead. No GPU,
-    #           no local download. Set vlm_model_api / api_base_url below.
-    vlm_provider: str = "api"   # "api" or "local"
+    # behaviour, unchanged).
+    # "api" → call an OpenAI-compatible REST endpoint instead. No GPU,
+    # no local download. Set vlm_model_api / api_base_url below.
+    vlm_provider: str = "local"  # "api" or "local"
 
     # Model name string sent to the API endpoint when vlm_provider == "api".
     vlm_model_api: str = "qwen3-vl-32b-instruct"
@@ -127,18 +122,18 @@ class Config:
     top_k_pages: int = 4
 
     # Scoring weights:
-    #   S = α·dense + β·sparse + γ·hierarchy + δ·graph + ε·rule_type
-    w_dense:     float = 1.00
-    w_sparse:    float = 0.60
+    # S = α·dense + β·sparse + γ·hierarchy + δ·graph + ε·rule_type
+    w_dense: float = 1.00
+    w_sparse: float = 0.60
     w_hierarchy: float = 0.20
-    w_graph:     float = 0.40
-    w_ruletype:  float = 0.30
+    w_graph: float = 0.40
+    w_ruletype: float = 0.30
 
     # Rule-type multipliers (modal-verb backbone of MUTCD).
     rt_weight_standard: float = 1.20
     rt_weight_guidance: float = 1.00
-    rt_weight_option:   float = 0.90
-    rt_weight_support:  float = 0.70
+    rt_weight_option: float = 0.90
+    rt_weight_support: float = 0.70
 
     # ----- Generation -------------------------------------------------------
     max_new_tokens: int = 480
@@ -170,10 +165,10 @@ class Config:
         # Qdrant on Colab lives on local /content for speed; we sync to/from Drive.
         self.qdrant_dir = _default_cache_dir(self.environment, self.base_dir)
 
-        self.chunks_jsonl     = self.cache_dir / "chunks.jsonl"
-        self.figures_jsonl    = self.cache_dir / "figures.jsonl"
-        self.sign_codes_json  = self.cache_dir / "sign_codes.json"
-        self.graph_pickle     = self.cache_dir / "graph.gpickle"
+        self.chunks_jsonl = self.cache_dir / "chunks.jsonl"
+        self.figures_jsonl = self.cache_dir / "figures.jsonl"
+        self.sign_codes_json = self.cache_dir / "sign_codes.json"
+        self.graph_pickle = self.cache_dir / "graph.gpickle"
 
         self.hf_home = _default_hf_home(self.environment, self.base_dir)
         os.environ.setdefault("HF_HOME", str(self.hf_home))
@@ -193,9 +188,8 @@ class Config:
         return {
             "Standard": self.rt_weight_standard,
             "Guidance": self.rt_weight_guidance,
-            "Option":   self.rt_weight_option,
-            "Support":  self.rt_weight_support,
+            "Option": self.rt_weight_option,
+            "Support": self.rt_weight_support,
         }.get(ct, 1.0)
-
 
 CFG = Config()
