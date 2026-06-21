@@ -4,6 +4,14 @@ Read by every other module via `from mrag.config import CFG`.
 
 Auto-detects environment (Colab / HPRC / local) and picks the right
 base directory accordingly. Override with the env var `MRAG_BASE_DIR`.
+
+Environment detection also respects `MRAG_ENV` if explicitly set. This
+matters because `scripts/ingest_v3.py` runs as a SEPARATE subprocess
+(via `!python scripts/ingest_v3.py` in the notebook) which never imports
+`google.colab` itself — without MRAG_ENV, that subprocess would wrongly
+detect "local" instead of "colab", causing it to build the Qdrant DB at
+a different path than the notebook kernel expects. Set MRAG_ENV="colab"
+once, early, in your Colab setup cell, and every subprocess inherits it.
 """
 from __future__ import annotations
 
@@ -15,7 +23,16 @@ from typing import Optional
 
 
 def detect_environment() -> str:
-    """Returns one of: 'colab', 'hprc', 'local'."""
+    """Returns one of: 'colab', 'hprc', 'local'.
+
+    Checks MRAG_ENV first (explicit, inherited by subprocesses) so that
+    scripts launched via `!python scripts/ingest_v3.py` detect the same
+    environment as the parent notebook kernel. Falls back to the
+    sys.modules check for direct in-kernel imports.
+    """
+    env_override = os.environ.get("MRAG_ENV")
+    if env_override in ("colab", "hprc", "local"):
+        return env_override
     if "google.colab" in sys.modules:
         return "colab"
     if os.environ.get("SCRATCH") and Path(os.environ["SCRATCH"]).exists():
@@ -74,7 +91,7 @@ class Config:
     vlm_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
     vlm_model_fallback: str = "Qwen/Qwen2.5-VL-3B-Instruct"
 
-    # ----- VLM provider (NEW) ------------------------------------------------
+    # ----- VLM provider -------------------------------------------------------
     # "local" → load vlm_model weights onto local GPU via transformers (original
     #           behaviour, unchanged).
     # "api"   → call an OpenAI-compatible REST endpoint instead. No GPU,
@@ -82,17 +99,13 @@ class Config:
     vlm_provider: str = "api"   # "api" or "local"
 
     # Model name string sent to the API endpoint when vlm_provider == "api".
-    # This is separate from vlm_model (which is the HF model ID used in
-    # "local" mode) so switching providers never collides with the other's
-    # naming scheme.
     vlm_model_api: str = "qwen3-vl-32b-instruct"
 
-    # OpenAI-compatible API endpoint. Use the INTERNATIONAL DashScope URL
+    # OpenAI-compatible API endpoint. INTERNATIONAL DashScope URL — use this
     # unless your Alibaba Cloud account is registered in mainland China.
     api_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
-    # Name of the environment variable holding the API key. Set this in your
-    # session (Colab Secrets, HPRC env, etc.) — never hard-code the key here.
+    # Name of the environment variable holding the API key.
     api_key_env_var: str = "VLM_API_KEY"
 
     # ----- Rendering --------------------------------------------------------
@@ -162,10 +175,6 @@ class Config:
         self.sign_codes_json  = self.cache_dir / "sign_codes.json"
         self.graph_pickle     = self.cache_dir / "graph.gpickle"
 
-        # HuggingFace model cache — only matters when vlm_provider == "local"
-        # (or for the always-local embedders: BGE-M3, ColQwen2, reranker).
-        # Redirected away from ~/.cache so it doesn't fill home/Drive quota
-        # unexpectedly.
         self.hf_home = _default_hf_home(self.environment, self.base_dir)
         os.environ.setdefault("HF_HOME", str(self.hf_home))
         os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(self.hf_home))
