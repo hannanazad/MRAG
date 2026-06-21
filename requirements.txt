@@ -15,21 +15,27 @@
 # ----- Core ML stack ---------------------------------------------------------
 torch>=2.3,<2.6
 torchvision>=0.18,<0.21
-# Transformers — originally pinned <4.55 for Qwen2.5-VL + ColQwen2
-# compatibility on a clean HPRC conda env. That upper bound conflicts with
-# Colab's pre-installed transformers + colpali-engine's own floor, causing
-# "ResolutionImpossible" on Colab. Relaxed to a lower bound only; pip will
-# resolve the highest mutually-compatible version on either platform. If
-# Qwen2.5-VL / ColQwen2 ever break against a too-new transformers, re-pin
-# an upper bound here and note the version that broke.
-transformers>=4.49
-accelerate>=0.33
+# Transformers — pinned <4.55 deliberately. transformers 4.55+ has had
+# repeated releases (up through at least 4.57.6 as of June 2026) with
+# circular-import regressions that break `from transformers import
+# PreTrainedModel`, which both FlagEmbedding (BGE-M3) and sentence-
+# transformers (the BGE-M3 fallback path) require at import time. This
+# is a known, still-unresolved upstream issue as of this writing — see
+# https://github.com/huggingface/transformers/issues/42548 and
+# https://github.com/QwenLM/Qwen3-VL/issues/1882. Do NOT remove this
+# upper bound without testing init_pipeline() end-to-end first.
+#
+# This pin can occasionally generate a pip warning on Colab about
+# google-colab/jupyter-kernel-gateway/ipykernel version conflicts (those
+# packages pin old ipykernel/jupyter-client, unrelated to transformers).
+# That warning is cosmetic — the install still succeeds and the running
+# kernel is unaffected. Do not "fix" that warning by loosening this pin.
+transformers>=4.49,<4.55
+accelerate>=0.33,<1.5
 safetensors>=0.4.3
-huggingface_hub>=0.24
+huggingface_hub>=0.24,<1.0
 qwen-vl-utils>=0.0.8
-torchao>=0.16          # was a separate manual "pip install -U torchao" step;
-                         # pinned here so it's installed correctly the first time
-                         # instead of needing a post-install patch.
+torchao>=0.16,<1.0
 # ----- API-mode VLM (Qwen3-VL via DashScope, or any OpenAI-compatible API) --
 openai>=1.40
 # ----- Retrieval models ------------------------------------------------------
