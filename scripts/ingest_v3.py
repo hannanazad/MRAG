@@ -16,6 +16,7 @@ Outputs (under $SCRATCH/MRAG/):
 from __future__ import annotations
 
 import argparse
+import numpy as np
 import logging
 import sys
 from pathlib import Path
