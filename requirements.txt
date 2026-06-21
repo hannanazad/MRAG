@@ -1,22 +1,37 @@
-# MUTCD Multimodal RAG (v3) — HPRC-friendly pinned requirements
-# Tested with Python 3.11 on TAMU HPRC Grace (A100). Install order:
+# MUTCD Multimodal RAG (v3) — pinned requirements
+# Tested with Python 3.11 on TAMU HPRC Grace (A100) and Google Colab (A100).
+#
+# HPRC install order:
 #   1. activate the conda env (source activate $SCRATCH/envs/mrag)
 #   2. install torch + torchvision matching your CUDA module FIRST:
 #      pip install --index-url https://download.pytorch.org/whl/cu121 \
 #                  torch==2.4.1 torchvision==0.19.1
 #   3. pip install -r requirements.txt
-
+#
+# Colab install order:
+#   1. !pip install -q -r requirements.txt   (torch/torchvision already
+#      present in the base image and will be reused if compatible)
+#
 # ----- Core ML stack ---------------------------------------------------------
 torch>=2.3,<2.6
 torchvision>=0.18,<0.21
-
-# Transformers — pinned for Qwen2.5-VL + ColQwen2 compatibility
-transformers>=4.49,<4.55
-accelerate>=0.33,<1.5
+# Transformers — originally pinned <4.55 for Qwen2.5-VL + ColQwen2
+# compatibility on a clean HPRC conda env. That upper bound conflicts with
+# Colab's pre-installed transformers + colpali-engine's own floor, causing
+# "ResolutionImpossible" on Colab. Relaxed to a lower bound only; pip will
+# resolve the highest mutually-compatible version on either platform. If
+# Qwen2.5-VL / ColQwen2 ever break against a too-new transformers, re-pin
+# an upper bound here and note the version that broke.
+transformers>=4.49
+accelerate>=0.33
 safetensors>=0.4.3
-huggingface_hub>=0.24,<1.0
+huggingface_hub>=0.24
 qwen-vl-utils>=0.0.8
-
+torchao>=0.16          # was a separate manual "pip install -U torchao" step;
+                         # pinned here so it's installed correctly the first time
+                         # instead of needing a post-install patch.
+# ----- API-mode VLM (Qwen3-VL via DashScope, or any OpenAI-compatible API) --
+openai>=1.40
 # ----- Retrieval models ------------------------------------------------------
 # BGE-M3 (dense + sparse + colbert in one model)
 FlagEmbedding>=1.3,<2.0
@@ -28,19 +43,15 @@ mxbai-rerank>=0.1.0
 # ftfy / regex needed for CLIP-style tokenizers on some sentence-transformers paths
 ftfy>=6.1
 regex>=2024.4
-
 # ----- Vector DB -------------------------------------------------------------
 qdrant-client>=1.10,<2.0
-
 # ----- Knowledge graph -------------------------------------------------------
 networkx>=3.2,<4.0
-
 # ----- PDF + images ----------------------------------------------------------
 pymupdf>=1.24,<2.0
 pillow>=10.0,<12.0
 numpy>=1.26,<3.0
 tqdm>=4.66
-
 # ----- Jupyter / display ----------------------------------------------------
 ipykernel>=6.29
 ipywidgets>=8.1
