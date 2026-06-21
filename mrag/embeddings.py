@@ -193,7 +193,14 @@ class Reranker:
     def rank(self, query: str, docs: List[str], top_k: int = 6) -> List[Tuple[int, float]]:
         """Return [(doc_index, score), ...] sorted descending."""
         if hasattr(self._model, "rank"):
-            res = self._model.rank(query=query, input=docs, top_k=top_k)
+            # mxbai-rerank's `rank()` kwarg for the candidate documents is
+            # named `documents` in 0.1.x+ (the released API on PyPI today).
+            # Earlier internal pre-release builds used `input`; we keep that
+            # as a fallback so we don't break if someone pins an old build.
+            try:
+                res = self._model.rank(query=query, documents=docs, top_k=top_k)
+            except TypeError:
+                res = self._model.rank(query=query, input=docs, top_k=top_k)
             return [(r.index, float(r.score)) for r in res]
         # CrossEncoder fallback
         pairs = [(query, d) for d in docs]
