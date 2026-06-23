@@ -1,9 +1,12 @@
-"""Qdrant local-file vector store: one DB folder, three collections.
+"""Qdrant local-file vector store: one DB folder, four collections.
 
 Collections:
-  mutcd_chunks   - chunks: dense + sparse, rich payload
-  mutcd_figures  - figures: dense on caption+title, payload incl. image_path
-  mutcd_pages    - pages:   ColPali multi-vector with binary quantization
+  mutcd_chunks          - chunks: dense + sparse, rich payload
+  mutcd_figures         - figures: dense on caption+title, payload incl. image_path
+  mutcd_figures_visual  - figures: ColPali multi-vector on the figure CROP IMAGE
+                          (added in v5 to retrieve figures by visual content
+                          rather than caption text)
+  mutcd_pages           - pages:   ColPali multi-vector with binary quantization
 
 All run in *embedded* mode via `QdrantClient(path=...)`. No daemon.
 """
@@ -62,7 +65,15 @@ class VectorStore:
         text_dim: int = 1024,
         page_patch_dim: int = 128,
         use_binary_quantization_for_pages: bool = True,
+        coll_figures_visual: Optional[str] = None,
+        figure_patch_dim: Optional[int] = None,
     ) -> None:
+        """Create (or re-create) the four collections.
+
+        coll_figures_visual is optional for backward compatibility — if not
+        provided, no visual-figures collection is created. figure_patch_dim
+        defaults to page_patch_dim (same ColPali model dimension).
+        """
         from qdrant_client.http import models as qm
 
         def recreate(name: str, vectors_config, sparse_vectors_config=None,
@@ -115,6 +126,25 @@ class VectorStore:
                 ),
             },
         )
+        # 4. Figures-visual: ColPali multi-vector on each figure CROP
+        # (added v5). Same schema shape as pages, just a different collection
+        # name so we can query figures and pages independently. Quantization
+        # is OFF here because figure counts are small (~hundreds) so memory
+        # isn't a concern and we want full-precision relevance ranking.
+        if coll_figures_visual:
+            fdim = figure_patch_dim or page_patch_dim
+            recreate(
+                coll_figures_visual,
+                vectors_config={
+                    "colbert": qm.VectorParams(
+                        size=fdim,
+                        distance=qm.Distance.COSINE,
+                        multivector_config=qm.MultiVectorConfig(
+                            comparator=qm.MultiVectorComparator.MAX_SIM,
+                        ),
+                    ),
+                },
+            )
 
     # ----- ingestion --------------------------------------------------------
 
@@ -174,6 +204,12 @@ class VectorStore:
                 ],
                 wait=True,
             )
+
+    # Figures-visual share the same multi-vector schema as pages, so we
+    # accept PageRow here too. Kept as a separate method name for clarity
+    # in callers.
+    def upsert_figures_visual(self, name: str, rows: List["PageRow"], batch: int = 32) -> None:
+        self.upsert_pages(name, rows, batch=batch)
 
     # ----- search -----------------------------------------------------------
     # Uses the modern `query_points()` API (qdrant-client >= 1.10). The
@@ -244,6 +280,38 @@ class VectorStore:
             with_payload=True,
         )
         return resp.points
+
+    def search_figures_visual(
+        self,
+        name: str,
+        multivec_query: np.ndarray,
+        top_k: int = 6,
+    ):
+        """ColPali multi-vector search over figure crops.
+
+        Identical shape to search_pages — figures-visual uses the same
+        multi-vector schema. If the collection doesn't exist (e.g.
+        ingestion was done with an older script that didn't populate it),
+        returns [] rather than raising, so the rest of retrieval can
+        proceed without this signal.
+        """
+        try:
+            if not self._client.collection_exists(name):
+                return []
+        except Exception:
+            pass
+        try:
+            resp = self._client.query_points(
+                collection_name=name,
+                query=multivec_query.tolist(),
+                using="colbert",
+                limit=top_k,
+                with_payload=True,
+            )
+            return resp.points
+        except Exception as e:
+            log.warning("search_figures_visual failed (%r); skipping visual figure path", e)
+            return []
 
 
 # --------------------------------------------------------------------------- #

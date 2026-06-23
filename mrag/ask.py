@@ -73,6 +73,38 @@ def ask(question: str, show_text: bool = False, show_scores: bool = False,
     p = init_pipeline()
     result = p.retriever.retrieve(question)
 
+    # Figure-relevance filter (v5+): retrieval returns up to
+    # CFG.top_k_figures_candidates figures; ask the VLM which are
+    # visually relevant and keep only the top CFG.top_k_figures.
+    # If the VLM isn't loaded or the filter is disabled, just keep
+    # the first top_k_figures retrieval gave us.
+    if result.figures:
+        if (getattr(CFG, "use_vlm_figure_filter", False)
+                and p.vlm is not None
+                and len(result.figures) > CFG.top_k_figures):
+            try:
+                kept_idx = p.vlm.filter_figures(
+                    question, result.figures, max_keep=CFG.top_k_figures,
+                )
+                if kept_idx:
+                    # Preserve VLM-given order; record drops in debug
+                    kept_set = set(kept_idx)
+                    dropped = [
+                        f.get("figure_id", "?")
+                        for i, f in enumerate(result.figures)
+                        if i not in kept_set
+                    ]
+                    result.figures = [result.figures[i] for i in kept_idx
+                                      if 0 <= i < len(result.figures)]
+                    result.debug["figures_dropped_by_filter"] = dropped
+            except Exception as e:
+                log.warning("VLM figure filter failed (%r); falling back to top-%d",
+                            e, CFG.top_k_figures)
+                result.figures = result.figures[: CFG.top_k_figures]
+        else:
+            # No filter — still cap at the display count
+            result.figures = result.figures[: CFG.top_k_figures]
+
     if p.vlm is not None:
         try:
             answer = p.vlm.answer(

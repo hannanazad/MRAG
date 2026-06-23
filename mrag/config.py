@@ -91,7 +91,7 @@ class Config:
     # behaviour, unchanged).
     # "api" → call an OpenAI-compatible REST endpoint instead. No GPU,
     # no local download. Set vlm_model_api / api_base_url below.
-    vlm_provider: str = "local"  # "api" or "local"
+    vlm_provider: str = "api"  # "api" or "local" — default is api (Qwen3-VL-32B via DashScope)
 
     # Model name string sent to the API endpoint when vlm_provider == "api".
     vlm_model_api: str = "qwen3-vl-32b-instruct"
@@ -109,7 +109,8 @@ class Config:
 
     # ----- Qdrant collection names -----------------------------------------
     coll_chunks: str = "mutcd_chunks"
-    coll_figures: str = "mutcd_figures"
+    coll_figures: str = "mutcd_figures"              # caption-embeddings (text)
+    coll_figures_visual: str = "mutcd_figures_visual"  # ColPali on figure crops
     coll_pages: str = "mutcd_pages"
 
     # ----- Retrieval --------------------------------------------------------
@@ -118,7 +119,29 @@ class Config:
     top_k_fused: int = 30
     top_k_after_graph: int = 40
     top_k_after_rerank: int = 6
-    top_k_figures: int = 6
+
+    # Figure retrieval works in stages now:
+    #   1. Path A — figures CITED by winning chunks (KG cross-links). High
+    #      precision; count is whatever the winners cite.
+    #   2. Path C — VISUAL retrieval via ColPali over figure crops (NEW).
+    #      Recovers figures that are visually relevant even when no chunk
+    #      explicitly cites them.
+    #   3. Path B — caption-text retrieval, kept as a fallback only. This
+    #      was the main source of off-topic figures in the previous design,
+    #      so it's now off by default. Set use_caption_figure_fallback=True
+    #      to re-enable.
+    #   4. (Optional) VLM filter that picks the visually-relevant subset.
+    #
+    # top_k_figures_candidates: how many figures to gather across paths A+B+C
+    # before any filtering. The VLM filter (if enabled) sees this many.
+    # top_k_figures: how many to actually display / pass to the answer-VLM
+    # after filtering. Was 6 (display only) in the old design.
+    top_k_figures_candidates: int = 10
+    top_k_figures: int = 4
+    top_k_figures_visual: int = 6
+    use_caption_figure_fallback: bool = False
+    use_vlm_figure_filter: bool = True
+
     top_k_pages: int = 4
 
     # Scoring weights:

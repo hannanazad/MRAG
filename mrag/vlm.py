@@ -182,9 +182,148 @@ class VLM:
         return response.choices[0].message.content.strip()
 
     # ────────────────────────────────────────────────────────────────────
-    # Prompt building — IDENTICAL logic to original, just refactored to
-    # return (prompt_text, image_paths) instead of a messages list, so
-    # both backends can consume it.
+    # Figure relevance filter (v5+) — one extra cheap VLM call that scores
+    # candidate figures for visual relevance to the question and returns
+    # the indices to keep. Used by ask.py to prune the retrieval candidates
+    # before they go into the answer prompt.
+    # ────────────────────────────────────────────────────────────────────
+
+    def filter_figures(
+        self,
+        question: str,
+        figures: List[Dict[str, Any]],
+        max_keep: int = 4,
+    ) -> List[int]:
+        """Return the subset of figure indices to keep, in priority order.
+
+        Falls back to "keep everything" if the call fails or the response
+        can't be parsed — never raises. Caller can pass at most ~12 figures
+        in one call (image-token budget); larger lists are processed in
+        a single request anyway since modern VLMs handle it.
+        """
+        if not figures:
+            return []
+        # Resolve to the actual on-disk images we can show. Anything
+        # without a usable image is dropped from consideration outright.
+        usable: List[tuple[int, str, Dict[str, Any]]] = []
+        for i, f in enumerate(figures):
+            ip = f.get("image_path", "")
+            if ip and Path(ip).exists():
+                usable.append((i, ip, f))
+        if not usable:
+            return []
+        if len(usable) <= max_keep:
+            # Nothing to prune — keep the order retrieval gave us.
+            return [i for i, _, _ in usable]
+
+        try:
+            if self.provider == "api":
+                kept = self._filter_figures_api(question, usable, max_keep)
+            else:
+                kept = self._filter_figures_local(question, usable, max_keep)
+        except Exception as e:
+            log.warning("filter_figures failed (%r); keeping top-%d unfiltered",
+                        e, max_keep)
+            return [i for i, _, _ in usable[:max_keep]]
+
+        # Validate kept indices, clip to max_keep
+        valid = [k for k in kept if any(i == k for i, _, _ in usable)]
+        if not valid:
+            # Model returned nothing valid — fall back to first max_keep
+            return [i for i, _, _ in usable[:max_keep]]
+        return valid[:max_keep]
+
+    def _filter_prompt(self, question: str, indexed_figures) -> str:
+        lines = []
+        for i, _ip, f in indexed_figures:
+            cap = (f.get("caption") or f.get("title") or "")[:140]
+            fid = f.get("figure_id", "?")
+            lines.append(f"  [{i}] {fid} — {cap}")
+        return (
+            "You are filtering figure crops for visual relevance.\n\n"
+            f'The user asked: "{question}"\n\n'
+            f"I'm showing you {len(indexed_figures)} candidate figures, "
+            "numbered as labelled below and provided in that order as image "
+            "inputs. Decide which ones a reader would actually need to SEE "
+            "(visual content shows what the user asked about) to understand "
+            "the answer. Be strict — prefer false negatives over false positives. "
+            "If a figure is unrelated even though its caption mentions a similar "
+            "term, drop it.\n\n"
+            "Candidates:\n" + "\n".join(lines) + "\n\n"
+            "Reply with ONLY a JSON array of the indices to keep, ordered "
+            "best-first. No explanation. Example: [0, 3, 7]"
+        )
+
+    @staticmethod
+    def _parse_filter_response(text: str) -> List[int]:
+        import json as _json
+        import re as _re
+        text = text.strip()
+        # Try direct JSON parse first
+        try:
+            v = _json.loads(text)
+            if isinstance(v, list):
+                return [int(x) for x in v if isinstance(x, (int, float))]
+        except Exception:
+            pass
+        # Fall back: extract the first [...]-looking substring
+        m = _re.search(r"\[[\s\d,]*\]", text)
+        if m:
+            try:
+                v = _json.loads(m.group(0))
+                if isinstance(v, list):
+                    return [int(x) for x in v if isinstance(x, (int, float))]
+            except Exception:
+                pass
+        return []
+
+    def _filter_figures_api(self, question, indexed_figures, max_keep):
+        prompt = self._filter_prompt(question, indexed_figures)
+        content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for _i, ip, _f in indexed_figures:
+            b64 = base64.b64encode(Path(ip).read_bytes()).decode("utf-8")
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64}"},
+            })
+        response = self._api_client.chat.completions.create(
+            model=CFG.vlm_model_api,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=80,  # short reply — just an index list
+        )
+        return self._parse_filter_response(
+            response.choices[0].message.content or ""
+        )
+
+    def _filter_figures_local(self, question, indexed_figures, max_keep):
+        import torch
+        from qwen_vl_utils import process_vision_info
+
+        prompt = self._filter_prompt(question, indexed_figures)
+        content: List[Dict[str, Any]] = [
+            {"type": "image", "image": f"file://{ip}"}
+            for _i, ip, _f in indexed_figures
+        ]
+        content.append({"type": "text", "text": prompt})
+        messages = [{"role": "user", "content": content}]
+        text = self._processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = self._processor(
+            text=[text], images=image_inputs, videos=video_inputs,
+            padding=True, return_tensors="pt",
+        ).to(self._model.device)
+        with torch.inference_mode():
+            gen = self._model.generate(
+                **inputs, max_new_tokens=80, do_sample=False,
+            )
+        trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, gen)]
+        out_text = self._processor.batch_decode(
+            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False,
+        )[0]
+        return self._parse_filter_response(out_text)
+
     # ────────────────────────────────────────────────────────────────────
 
     def _build_prompt_and_images(self, question, chunks, figures, pages):

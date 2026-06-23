@@ -181,7 +181,7 @@ def step_page_embeddings(out_dir: Path):
 
     # Skip pages we've already encoded.
     todo = [p for p in pngs if not (cache / f"{int(p.stem.split('_')[1]):04d}.npy").exists()]
-    log.info("ColPali: %d pages total, %d already cached, %d to encode",
+    log.info("ColPali pages: %d total, %d already cached, %d to encode",
              len(pngs), len(pngs) - len(todo), len(todo))
 
     if todo:
@@ -207,18 +207,87 @@ def step_page_embeddings(out_dir: Path):
         page_num = int(p.stem.split("_")[1])
         vec = np.load(cache / f"{page_num:04d}.npy")
         out.append((page_num, str(p), vec))
-    log.info("ColPali: %d page vectors ready", len(out))
+    log.info("ColPali pages: %d page vectors ready", len(out))
     return out
 
 
-def step_upsert_qdrant(chunks, figures, dense_c, sparse_c, dense_f, page_data):
+def _figure_cache_name(figure_id: str) -> str:
+    """Filesystem-safe slug for a figure_id like 'Figure 2B-1'."""
+    return (
+        figure_id.replace(" ", "_").replace("/", "_").replace(".", "_")
+        .replace(":", "_")
+    )
+
+
+def step_figure_visual_embeddings(figures):
+    """Encode each figure CROP with ColQwen2 — added in v5.
+
+    Mirrors step_page_embeddings but operates on figure crops instead of
+    full-page renders, and caches under colqwen_figures/. Returns
+    list[(figure_id, image_path, vectors)] for the upsert step, or None
+    if ColQwen2 can't load or there are no figures.
+
+    Reuses any ColQwen2 instance loaded earlier in this run by returning
+    via a module-level cache, so we don't pay the model-load cost twice.
+    """
+    if not figures:
+        log.warning("No figures to embed visually; skipping.")
+        return None
+
+    cache = CFG.cache_dir / "colqwen_figures"
+    cache.mkdir(parents=True, exist_ok=True)
+
+    pairs: list[tuple[str, str, Path]] = []  # (figure_id, image_path, cache_path)
+    for f in figures:
+        ip = getattr(f, "image_path", "") or ""
+        if not ip or not Path(ip).exists():
+            continue
+        cp = cache / f"{_figure_cache_name(f.figure_id)}.npy"
+        pairs.append((f.figure_id, ip, cp))
+
+    todo = [(fid, ip, cp) for fid, ip, cp in pairs if not cp.exists()]
+    log.info("ColPali figures: %d total, %d already cached, %d to encode",
+             len(pairs), len(pairs) - len(todo), len(todo))
+
+    if todo:
+        log.info("Loading ColQwen2 image embedder (for figure crops) ...")
+        try:
+            ie = ImageEmbedder(CFG.colqwen_model).load()
+        except Exception as e:
+            log.warning("ColQwen2 unavailable (%r); skipping figure-visual embeddings.", e)
+            return None
+
+        batch = 2
+        for i in tqdm(range(0, len(todo), batch), desc="colqwen figures"):
+            sub = todo[i:i+batch]
+            imgs = [Image.open(ip).convert("RGB") for _fid, ip, _cp in sub]
+            vecs = ie.encode_images(imgs, batch_size=batch)
+            for (fid, ip, cp), v in zip(sub, vecs):
+                np.save(cp, v)
+
+    out = []
+    for fid, ip, cp in pairs:
+        v = np.load(cp)
+        out.append((fid, ip, v))
+    log.info("ColPali figures: %d figure-image vectors ready", len(out))
+    return out
+
+
+def step_upsert_qdrant(chunks, figures, dense_c, sparse_c, dense_f, page_data,
+                       figure_visual_data=None):
     store = VectorStore(CFG.qdrant_dir)
     page_dim = page_data[0][2].shape[1] if page_data else 128
+    # figure-visual uses the same ColPali dim as pages
+    fig_visual_dim = (
+        figure_visual_data[0][2].shape[1] if figure_visual_data else page_dim
+    )
     store.init_collections(
         CFG.coll_chunks, CFG.coll_figures, CFG.coll_pages,
         text_dim=dense_c.shape[1],
         page_patch_dim=page_dim,
         use_binary_quantization_for_pages=CFG.colqwen_use_binary_quantization,
+        coll_figures_visual=CFG.coll_figures_visual,
+        figure_patch_dim=fig_visual_dim,
     )
 
     # Chunks
@@ -278,6 +347,34 @@ def step_upsert_qdrant(chunks, figures, dense_c, sparse_c, dense_f, page_data):
         log.info("Upserting %d pages (ColPali multivectors) to Qdrant ...", len(page_rows))
         store.upsert_pages(CFG.coll_pages, page_rows)
 
+    # Figures-visual (multivector, ColPali on figure crops) -----------------
+    if figure_visual_data:
+        # Build a quick map from figure_id -> figures.jsonl payload so we
+        # can attach caption / page / sign_codes alongside the vector.
+        fig_lookup = {f.figure_id: f for f in figures}
+        fv_rows = []
+        for fid, ip, vecs in figure_visual_data:
+            f = fig_lookup.get(fid)
+            payload = {
+                "figure_id":           fid,
+                "kind":                getattr(f, "kind", "") if f else "",
+                "page_pdf":            getattr(f, "page_pdf", None) if f else None,
+                "page_printed":        getattr(f, "page_printed", None) if f else None,
+                "caption":             getattr(f, "caption", "") if f else "",
+                "title":               getattr(f, "title", "") if f else "",
+                "image_path":          ip,
+                "sign_codes_depicted": list(getattr(f, "sign_codes_depicted", []) or [])
+                                       if f else [],
+            }
+            fv_rows.append(PageRow(
+                id=chunk_id_to_int(f"figvis:{fid}"),
+                vectors=vecs,
+                payload=payload,
+            ))
+        log.info("Upserting %d figure-visual rows (ColPali on crops) to Qdrant ...",
+                 len(fv_rows))
+        store.upsert_figures_visual(CFG.coll_figures_visual, fv_rows)
+
 
 # --------------------------------------------------------------------------- #
 def main():
@@ -288,6 +385,8 @@ def main():
                     help="Skip page rendering")
     ap.add_argument("--skip-figures",    action="store_true",
                     help="Skip figure crop extraction")
+    ap.add_argument("--skip-figure-visual", action="store_true",
+                    help="Skip ColPali embedding of figure CROPS (v5+ feature)")
     args = ap.parse_args()
 
     log.info("MUTCD MRAG ingestion v3")
@@ -311,8 +410,13 @@ def main():
 
     dense_c, sparse_c, dense_f = step_text_embeddings(chunks, figures)
     page_data = None if args.skip_pages else step_page_embeddings(CFG.page_images_dir)
+    figure_visual_data = (
+        None if args.skip_figure_visual
+        else step_figure_visual_embeddings(figures)
+    )
 
-    step_upsert_qdrant(chunks, figures, dense_c, sparse_c, dense_f, page_data)
+    step_upsert_qdrant(chunks, figures, dense_c, sparse_c, dense_f, page_data,
+                       figure_visual_data=figure_visual_data)
     log.info("Done. Qdrant at %s | KG at %s", CFG.qdrant_dir, CFG.graph_pickle)
 
     # Auto-snapshot to Drive on Colab so a session death never wipes the work.

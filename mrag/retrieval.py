@@ -9,8 +9,14 @@
    │     S = α·dense + β·sparse + γ·hierarchy + δ·graph + ε·w(content_type)
    ├─ mxbai-rerank-large-v2 over top-K1 ──► top-K2 chunks
    ├─ ColQwen2 page retrieval (parallel) ─► top-K3 pages
-   └─ pull cross-linked figures from winning chunks (via KG)
-        + extra figure retrieval (BGE-M3 on caption/title)
+   └─ figures, merged from three paths:
+       Path A — cross-linked from winning chunks via the KG (`see Figure 2B-1`)
+       Path C — ColQwen2 VISUAL retrieval over figure crops (added v5)
+       Path B — caption-text similarity (off by default — was a major source
+                of off-topic figures; toggle via CFG.use_caption_figure_fallback)
+       Deduplicated and capped at CFG.top_k_figures_candidates. Optional
+       VLM-based relevance filter (CFG.use_vlm_figure_filter) prunes to
+       CFG.top_k_figures before display.
 """
 from __future__ import annotations
 
@@ -109,27 +115,72 @@ class Retriever:
             final_chunks.append({**payload, "score": score})
         result.chunks = final_chunks
 
-        # 6. Figures by chunk cross-links + caption retrieval --------------
+        # 6. Figures — three paths (A: KG cross-links, C: visual, B: caption)
+        #    A and C are run unconditionally; B only if explicitly enabled.
         figure_ids_seen: Set[str] = set()
         figs_out: List[Dict[str, Any]] = []
+        candidate_cap = CFG.top_k_figures_candidates
+
+        # Path A: figures the winning chunks explicitly cite via "see Figure X-Y"
         for ch in final_chunks:
             for fid in self.kg.figures_for_chunk(ch.get("chunk_id", "")):
-                if fid in figure_ids_seen: continue
+                if fid in figure_ids_seen:
+                    continue
                 figure_ids_seen.add(fid)
                 payload = _figure_payload_from_graph(self.kg, fid)
                 if payload:
+                    payload["source"] = "kg_link"
                     figs_out.append(payload)
-        # Top up with caption retrieval if too few.
-        if len(figs_out) < CFG.top_k_figures:
-            extra_hits = self.store.search_figures(CFG.coll_figures, dense_q, top_k=CFG.top_k_figures)
+                if len(figs_out) >= candidate_cap:
+                    break
+            if len(figs_out) >= candidate_cap:
+                break
+
+        # Path C: visual retrieval via ColPali on figure CROPS.
+        # Only available if the image embedder loaded AND the visual
+        # collection was populated by ingestion (v5+).
+        if self.img is not None and len(figs_out) < candidate_cap:
+            try:
+                q_mv = self.img.encode_queries([query])[0]
+                visual_hits = self.store.search_figures_visual(
+                    CFG.coll_figures_visual, q_mv,
+                    top_k=CFG.top_k_figures_visual,
+                )
+                for h in visual_hits:
+                    payload = h.payload or {}
+                    fid = payload.get("figure_id")
+                    if fid and fid not in figure_ids_seen:
+                        figure_ids_seen.add(fid)
+                        figs_out.append({
+                            **payload,
+                            "score": float(getattr(h, "score", 0.0)),
+                            "source": "visual",
+                        })
+                    if len(figs_out) >= candidate_cap:
+                        break
+            except Exception as e:
+                log.warning("Visual figure retrieval failed: %r", e)
+
+        # Path B: caption-text fallback (OFF by default in v5+). Was the
+        # main contributor of off-topic figures in the previous design.
+        if (CFG.use_caption_figure_fallback
+                and len(figs_out) < candidate_cap):
+            extra_hits = self.store.search_figures(
+                CFG.coll_figures, dense_q, top_k=candidate_cap,
+            )
             for h in extra_hits:
                 payload = h.payload or {}
                 fid = payload.get("figure_id")
                 if fid and fid not in figure_ids_seen:
                     figure_ids_seen.add(fid)
-                    figs_out.append({**payload, "score": float(h.score)})
-                if len(figs_out) >= CFG.top_k_figures:
+                    figs_out.append({
+                        **payload,
+                        "score": float(h.score),
+                        "source": "caption",
+                    })
+                if len(figs_out) >= candidate_cap:
                     break
+
         result.figures = figs_out
 
         # 7. ColPali page retrieval (optional) ------------------------------
